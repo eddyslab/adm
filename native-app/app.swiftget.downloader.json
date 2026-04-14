@@ -1,0 +1,7 @@
+{
+  "name": "app.swiftget.downloader",
+  "description": "SwiftGet Download Manager Native Host",
+  "path": "/Applications/SwiftGet.app/Contents/MacOS/swiftget-host",
+  "type": "stdio",
+  "allowed_extensions": ["swiftget@downloader.app"]
+}

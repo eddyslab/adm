@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SwiftGet</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@600;700;800&display=swap');
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 300px;
+      background: #0d0d0f;
+      color: #e8e6e0;
+      font-family: 'DM Mono', monospace;
+      font-size: 12px;
+      overflow: hidden;
+    }
+
+    .header {
+      padding: 16px 18px 12px;
+      border-bottom: 1px solid #1e1e24;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -0.5px;
+      color: #fff;
+    }
+
+    .logo span {
+      color: #4ade80;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #ef4444;
+      margin-left: auto;
+      transition: background 0.3s;
+    }
+
+    .status-dot.connected {
+      background: #4ade80;
+      box-shadow: 0 0 8px #4ade8066;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .status-label {
+      font-size: 10px;
+      color: #666;
+      letter-spacing: 0.05em;
+    }
+
+    .section {
+      padding: 14px 18px;
+      border-bottom: 1px solid #1e1e24;
+    }
+
+    .section-title {
+      font-size: 9px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: #555;
+      margin-bottom: 10px;
+    }
+
+    .url-input {
+      width: 100%;
+      background: #141418;
+      border: 1px solid #2a2a33;
+      border-radius: 4px;
+      color: #e8e6e0;
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      padding: 8px 10px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .url-input:focus {
+      border-color: #4ade80;
+    }
+
+    .url-input::placeholder {
+      color: #444;
+    }
+
+    .btn {
+      width: 100%;
+      margin-top: 8px;
+      padding: 8px;
+      background: #4ade80;
+      color: #0d0d0f;
+      border: none;
+      border-radius: 4px;
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    .btn:hover { opacity: 0.9; }
+    .btn:active { transform: scale(0.98); }
+
+    .btn-secondary {
+      background: #1e1e24;
+      color: #e8e6e0;
+      border: 1px solid #2a2a33;
+    }
+
+    .btn-secondary:hover { background: #28282f; opacity: 1; }
+
+    .footer {
+      padding: 12px 18px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+      color: #666;
+      font-size: 11px;
+    }
+
+    .info-row .val {
+      color: #aaa;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%) translateY(40px);
+      background: #4ade80;
+      color: #0d0d0f;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: 11px;
+      opacity: 0;
+      transition: all 0.3s;
+      white-space: nowrap;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">Swift<span>Get</span></div>
+    <span class="status-label" id="statusLabel">연결 확인 중...</span>
+    <div class="status-dot" id="statusDot"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">URL 직접 추가</div>
+    <input class="url-input" id="urlInput" type="text" placeholder="https://example.com/file.zip" />
+    <button class="btn" id="addBtn">다운로드 추가</button>
+  </div>
+
+  <div class="section">
+    <div class="section-title">상태</div>
+    <div class="info-row">
+      <span>앱 연결</span>
+      <span class="val" id="connStatus">확인 중...</span>
+    </div>
+    <div class="info-row">
+      <span>차단 확장자</span>
+      <span class="val">zip, mp4, mp3 외 30+</span>
+    </div>
+  </div>
+
+  <div class="footer">
+    <button class="btn btn-secondary" id="focusBtn" style="flex:1">앱 열기</button>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
