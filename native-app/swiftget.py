@@ -5,6 +5,7 @@ SwiftGet — macOS Download Manager GUI
 - Pause / Resume / Cancel
 - Menu bar (system tray) resident
 - Receives jobs from Firefox addon via Unix socket
+- UI: wxPython (native Cocoa widgets)
 """
 
 import os
@@ -14,13 +15,10 @@ import struct
 import socket
 import threading
 import time
-import math
 import urllib.request
 import urllib.parse
 import urllib.error
 import http.client
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
@@ -33,21 +31,47 @@ import objc
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-APP_NAME    = "SwiftGet"
-SOCKET_PATH = os.path.expanduser("~/Library/Application Support/SwiftGet/swiftget.sock")
-SAVE_DIR    = os.path.expanduser("~/Downloads")
-LOG_DIR     = os.path.expanduser("~/Library/Logs/SwiftGet")
-SEGMENTS    = 8          # parallel segments per download
-CHUNK_SIZE  = 65536      # 64 KB read chunk
+APP_NAME     = "SwiftGet"
+CONFIG_DIR   = os.path.expanduser("~/Library/Application Support/SwiftGet")
+CONFIG_PATH  = os.path.join(CONFIG_DIR, "config.json")
+SOCKET_PATH  = os.path.join(CONFIG_DIR, "swiftget.sock")
+LOG_DIR      = os.path.expanduser("~/Library/Logs/SwiftGet")
+CHUNK_SIZE   = 65536
 
-os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(filename=os.path.join(LOG_DIR, "swiftget.log"),
                     level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 
+# ── Persistent settings ──────────────────────────────────────────────────────
+
+_DEFAULTS = {
+    "save_dir": os.path.expanduser("~/Downloads"),
+    "segments": 8,
+}
+
+def load_config() -> dict:
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            data = json.load(f)
+        return {**_DEFAULTS, **data}
+    except Exception:
+        return dict(_DEFAULTS)
+
+def save_config(cfg: dict):
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        logging.warning(f"Config save failed: {e}")
+
+_cfg     = load_config()
+SAVE_DIR = _cfg["save_dir"]
+SEGMENTS = _cfg["segments"]
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Download Engine
+# Download Engine  (unchanged)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Status(Enum):
@@ -66,19 +90,20 @@ class DownloadJob:
     save_path:  str
     referrer:   str    = ""
     cookies:    str    = ""
-    total:      int    = -1   # bytes, -1 = unknown
+    total:      int    = -1
     downloaded: int    = 0
     status:     Status = Status.QUEUED
     error_msg:  str    = ""
-    speed:      float  = 0.0  # bytes/s
-    eta:        int    = -1   # seconds
-    # internals
+    speed:      float  = 0.0
+    eta:        int    = -1
+    seg_downloaded: list = field(default_factory=list, repr=False)  # bytes per segment
+    seg_sizes:      list = field(default_factory=list, repr=False)  # total bytes per segment
     _pause_evt: threading.Event = field(default_factory=threading.Event, repr=False)
     _cancel_evt:threading.Event = field(default_factory=threading.Event, repr=False)
     _lock:      threading.Lock  = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self):
-        self._pause_evt.set()   # not paused by default
+        self._pause_evt.set()
 
 def human_size(n: int) -> str:
     if n < 0:      return "?"
@@ -91,56 +116,47 @@ def human_speed(bps: float) -> str:
     return human_size(int(bps)) + "/s"
 
 def human_eta(secs: int) -> str:
-    if secs < 0:   return "--:--"
-    if secs < 60:  return f"{secs}s"
-    if secs < 3600:return f"{secs//60}m {secs%60}s"
+    if secs < 0:    return "--:--"
+    if secs < 60:   return f"{secs}s"
+    if secs < 3600: return f"{secs//60}m {secs%60}s"
     return f"{secs//3600}h {(secs%3600)//60}m"
 
 class DownloadEngine:
-    """Manages a pool of DownloadJob threads."""
-
     def __init__(self, on_update):
         self.jobs: list[DownloadJob] = []
         self.on_update = on_update
         self._lock = threading.Lock()
         self._max_concurrent = 3
+        self.segments = SEGMENTS
 
     def add(self, url, filename="", referrer="", cookies="") -> DownloadJob:
         if not filename:
             parsed = urllib.parse.urlparse(url)
             filename = os.path.basename(parsed.path) or "download"
             filename = urllib.parse.unquote(filename)
-
-        save_path = os.path.join(SAVE_DIR, filename)
-        # Avoid overwriting
+        save_dir  = getattr(self, "save_dir", SAVE_DIR)
+        save_path = os.path.join(save_dir, filename)
         base, ext = os.path.splitext(save_path)
         counter = 1
         while os.path.exists(save_path):
             save_path = f"{base} ({counter}){ext}"
             counter += 1
-
         import uuid
-        job = DownloadJob(
-            uid=str(uuid.uuid4())[:8],
-            url=url,
-            filename=os.path.basename(save_path),
-            save_path=save_path,
-            referrer=referrer,
-            cookies=cookies,
-        )
+        job = DownloadJob(uid=str(uuid.uuid4())[:8], url=url,
+                          filename=os.path.basename(save_path),
+                          save_path=save_path, referrer=referrer, cookies=cookies)
         with self._lock:
             self.jobs.append(job)
         self._try_start(job)
         return job
 
-    def _try_start(self, job: DownloadJob):
+    def _try_start(self, job):
         with self._lock:
             running = sum(1 for j in self.jobs if j.status == Status.RUNNING)
         if running < self._max_concurrent:
-            t = threading.Thread(target=self._run, args=(job,), daemon=True)
-            t.start()
+            threading.Thread(target=self._run, args=(job,), daemon=True).start()
 
-    def _run(self, job: DownloadJob):
+    def _run(self, job):
         job.status = Status.RUNNING
         self.on_update()
         try:
@@ -149,10 +165,8 @@ class DownloadEngine:
                 job.status = Status.DONE
                 job.speed  = 0
         except Exception as e:
-            if job._cancel_evt.is_set():
-                job.status = Status.CANCELLED
-            else:
-                job.status = Status.ERROR
+            job.status = Status.CANCELLED if job._cancel_evt.is_set() else Status.ERROR
+            if job.status == Status.ERROR:
                 job.error_msg = str(e)
                 logging.error(f"Download error [{job.uid}]: {e}")
         finally:
@@ -164,85 +178,70 @@ class DownloadEngine:
             running = sum(1 for j in self.jobs if j.status == Status.RUNNING)
             queued  = [j for j in self.jobs if j.status == Status.QUEUED]
         for j in queued[:max(0, self._max_concurrent - running)]:
-            t = threading.Thread(target=self._run, args=(j,), daemon=True)
-            t.start()
+            threading.Thread(target=self._run, args=(j,), daemon=True).start()
 
-    def _download(self, job: DownloadJob):
-        """Segmented download with pause/resume support."""
+    def _download(self, job):
         headers = {"User-Agent": "SwiftGet/1.0"}
-        if job.referrer:  headers["Referer"] = job.referrer
-        if job.cookies:   headers["Cookie"]  = job.cookies
-
-        # Probe total size + range support
+        if job.referrer: headers["Referer"] = job.referrer
+        if job.cookies:  headers["Cookie"]  = job.cookies
         req = urllib.request.Request(job.url, headers={**headers, "Range": "bytes=0-0"})
+        n_seg = self.segments
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 cr = resp.headers.get("Content-Range", "")
                 supports_range = resp.status == 206
-                if cr:
-                    job.total = int(cr.split("/")[-1])
-                else:
-                    cl = resp.headers.get("Content-Length")
-                    job.total = int(cl) if cl else -1
+                job.total = int(cr.split("/")[-1]) if cr else \
+                            (int(resp.headers.get("Content-Length")) if resp.headers.get("Content-Length") else -1)
         except Exception:
             supports_range = False
             job.total = -1
-
-        if supports_range and job.total > 0 and SEGMENTS > 1:
-            self._segmented_download(job, headers)
+        if supports_range and job.total > 0 and n_seg > 1:
+            self._segmented_download(job, headers, n_seg)
         else:
             self._simple_download(job, headers)
 
-    def _simple_download(self, job: DownloadJob, headers: dict):
+    def _simple_download(self, job, headers):
         req = urllib.request.Request(job.url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             if job.total < 0:
                 cl = resp.headers.get("Content-Length")
                 if cl: job.total = int(cl)
-
             t0 = time.time()
-            downloaded_window = 0
-
+            win = 0
             with open(job.save_path, "wb") as f:
                 while True:
                     if job._cancel_evt.is_set(): raise Exception("Cancelled")
-                    job._pause_evt.wait()  # blocks while paused
-
+                    job._pause_evt.wait()
                     chunk = resp.read(CHUNK_SIZE)
                     if not chunk: break
-
                     f.write(chunk)
-                    with job._lock:
-                        job.downloaded += len(chunk)
-                    downloaded_window += len(chunk)
-
+                    with job._lock: job.downloaded += len(chunk)
+                    win += len(chunk)
                     elapsed = time.time() - t0
                     if elapsed >= 0.5:
-                        job.speed = downloaded_window / elapsed
+                        job.speed = win / elapsed
                         if job.total > 0:
-                            remaining = job.total - job.downloaded
-                            job.eta = int(remaining / job.speed) if job.speed > 0 else -1
-                        t0 = time.time()
-                        downloaded_window = 0
+                            job.eta = int((job.total - job.downloaded) / job.speed) if job.speed > 0 else -1
+                        t0 = time.time(); win = 0
                         self.on_update()
 
-    def _segmented_download(self, job: DownloadJob, headers: dict):
-        seg_size = job.total // SEGMENTS
-        ranges   = [(i * seg_size, (i + 1) * seg_size - 1) for i in range(SEGMENTS)]
-        ranges[-1] = (ranges[-1][0], job.total - 1)  # last seg to EOF
-
-        tmp_files = [f"{job.save_path}.part{i}" for i in range(SEGMENTS)]
-        errors    = [None] * SEGMENTS
+    def _segmented_download(self, job, headers, n_seg):
+        seg_size  = job.total // n_seg
+        ranges    = [(i * seg_size, (i+1) * seg_size - 1) for i in range(n_seg)]
+        ranges[-1]= (ranges[-1][0], job.total - 1)
+        tmp_files = [f"{job.save_path}.part{i}" for i in range(n_seg)]
+        errors    = [None] * n_seg
         threads   = []
+        t_start   = time.time(); prev_dl = 0
 
-        t_start = time.time()
-        prev_dl = 0
+        # Initialise per-segment tracking
+        job.seg_sizes      = [end - start + 1 for start, end in ranges]
+        job.seg_downloaded = [0] * n_seg
 
-        def download_segment(idx, start, end):
+        def dl_seg(idx, start, end):
             h = {**headers, "Range": f"bytes={start}-{end}"}
-            req = urllib.request.Request(job.url, headers=h)
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp, \
+                with urllib.request.urlopen(urllib.request.Request(job.url, headers=h), timeout=30) as resp, \
                      open(tmp_files[idx], "wb") as f:
                     while True:
                         if job._cancel_evt.is_set(): return
@@ -252,40 +251,31 @@ class DownloadEngine:
                         f.write(chunk)
                         with job._lock:
                             job.downloaded += len(chunk)
+                            job.seg_downloaded[idx] += len(chunk)
             except Exception as e:
                 errors[idx] = e
 
         for i, (s, e) in enumerate(ranges):
-            t = threading.Thread(target=download_segment, args=(i, s, e), daemon=True)
-            threads.append(t)
-            t.start()
+            t = threading.Thread(target=dl_seg, args=(i, s, e), daemon=True)
+            threads.append(t); t.start()
 
-        # Progress reporting loop
         while any(t.is_alive() for t in threads):
             if job._cancel_evt.is_set(): break
             time.sleep(0.5)
-            elapsed = time.time() - t_start
-            dl_now  = job.downloaded
-            job.speed = (dl_now - prev_dl) / 0.5
-            prev_dl   = dl_now
+            dl_now = job.downloaded
+            job.speed = (dl_now - prev_dl) / 0.5; prev_dl = dl_now
             if job.total > 0 and job.speed > 0:
                 job.eta = int((job.total - dl_now) / job.speed)
             self.on_update()
 
-        for t in threads:
-            t.join()
-
+        for t in threads: t.join()
         if job._cancel_evt.is_set():
             for f in tmp_files:
                 try: os.remove(f)
                 except: pass
             return
-
         errs = [e for e in errors if e]
-        if errs:
-            raise Exception(f"Segment error: {errs[0]}")
-
-        # Merge parts
+        if errs: raise Exception(f"Segment error: {errs[0]}")
         with open(job.save_path, "wb") as out:
             for part in tmp_files:
                 with open(part, "rb") as inp:
@@ -295,314 +285,499 @@ class DownloadEngine:
                         out.write(chunk)
                 os.remove(part)
 
-    def pause(self, job: DownloadJob):
+    def pause(self, job):
         if job.status == Status.RUNNING:
-            job._pause_evt.clear()
-            job.status = Status.PAUSED
-            self.on_update()
+            job._pause_evt.clear(); job.status = Status.PAUSED; self.on_update()
 
-    def resume(self, job: DownloadJob):
+    def resume(self, job):
         if job.status == Status.PAUSED:
-            job.status = Status.RUNNING
-            job._pause_evt.set()
-            self.on_update()
+            job.status = Status.RUNNING; job._pause_evt.set(); self.on_update()
 
-    def cancel(self, job: DownloadJob):
-        job._cancel_evt.set()
-        job._pause_evt.set()  # unblock if paused
+    def cancel(self, job):
+        job._cancel_evt.set(); job._pause_evt.set()
 
-    def remove(self, job: DownloadJob):
+    def remove(self, job):
         self.cancel(job)
         with self._lock:
             self.jobs = [j for j in self.jobs if j.uid != job.uid]
         self.on_update()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tkinter GUI
+# wxPython GUI
 # ─────────────────────────────────────────────────────────────────────────────
 
-DARK_BG   = "#0d0d0f"
-CARD_BG   = "#141418"
-BORDER    = "#1e1e24"
-TEXT_PRI  = "#e8e6e0"
-TEXT_SEC  = "#888880"
-ACCENT    = "#4ade80"
-ERROR_COL = "#f87171"
-PAUSE_COL = "#fbbf24"
-FONT_MONO = ("Menlo", 11)
-FONT_HEAD = ("Helvetica Neue", 13, "bold")
-FONT_SM   = ("Menlo", 10)
+import wx
+import wx.lib.scrolledpanel as scrolled
 
-class SwiftGetApp(tk.Tk):
+# Custom event to trigger UI refresh from background threads
+EVT_REFRESH_ID = wx.NewEventType()
+EVT_REFRESH    = wx.PyEventBinder(EVT_REFRESH_ID, 1)
+
+class RefreshEvent(wx.PyCommandEvent):
+    def __init__(self):
+        super().__init__(EVT_REFRESH_ID)
+
+
+# ── Segment progress bar ──────────────────────────────────────────────────────
+
+class SegmentBar(wx.Panel):
+    """Shows individual segment progress as coloured blocks side by side."""
+
+    COL_DONE    = wx.Colour(52,  199,  89)   # green  — complete
+    COL_ACTIVE  = wx.Colour(10,  132, 255)   # blue   — in progress
+    COL_QUEUED  = wx.Colour(210, 210, 210)   # grey   — not started
+    COL_PAUSED  = wx.Colour(255, 159,  10)   # amber  — paused
+    COL_ERROR   = wx.Colour(255,  59,  48)   # red    — error
+    GAP         = 2                          # px gap between segments
+
+    def __init__(self, parent):
+        super().__init__(parent, size=(-1, 5))
+        self.SetMinSize((-1, 5))
+        self._fractions: list[float] = []   # 0.0–1.0 per segment
+        self._job_status = Status.RUNNING
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_SIZE,  lambda e: self.Refresh())
+
+    def update(self, job: 'DownloadJob'):
+        if job.seg_sizes and job.seg_downloaded:
+            self._fractions = [
+                min(dl / sz, 1.0) if sz > 0 else 0.0
+                for dl, sz in zip(job.seg_downloaded, job.seg_sizes)
+            ]
+        else:
+            self._fractions = []
+        self._job_status = job.status
+        self.Refresh()
+
+    def _on_paint(self, event):
+        dc   = wx.PaintDC(self)
+        w, h = self.GetClientSize()
+        n    = len(self._fractions)
+        if n == 0:
+            return
+
+        total_gap = self.GAP * (n - 1)
+        seg_w     = max(1, (w - total_gap) / n)
+
+        for i, frac in enumerate(self._fractions):
+            x = int(i * (seg_w + self.GAP))
+            sw = int(seg_w)
+
+            # Background track
+            dc.SetBrush(wx.Brush(self.COL_QUEUED))
+            dc.SetPen(wx.TRANSPARENT_PEN)
+            dc.DrawRectangle(x, 0, sw, h)
+
+            # Filled portion
+            if frac > 0:
+                if self._job_status == Status.PAUSED:
+                    fill_col = self.COL_PAUSED
+                elif self._job_status == Status.ERROR:
+                    fill_col = self.COL_ERROR
+                elif frac >= 1.0:
+                    fill_col = self.COL_DONE
+                else:
+                    fill_col = self.COL_ACTIVE
+                dc.SetBrush(wx.Brush(fill_col))
+                dc.DrawRectangle(x, 0, max(1, int(sw * frac)), h)
+
+
+# ── Per-job card panel ────────────────────────────────────────────────────────
+
+class JobCard(wx.Panel):
+    """One download item rendered as a native card."""
+
+    # Status colours — works in both light and dark mode
+    STATUS_COLOUR = {
+        Status.QUEUED:    wx.Colour(150, 150, 150),
+        Status.RUNNING:   wx.Colour(52,  199,  89),   # macOS green
+        Status.PAUSED:    wx.Colour(255, 159,  10),   # macOS yellow
+        Status.DONE:      wx.Colour(52,  199,  89),
+        Status.ERROR:     wx.Colour(255,  59,  48),   # macOS red
+        Status.CANCELLED: wx.Colour(150, 150, 150),
+    }
+    STATUS_LABEL = {
+        Status.QUEUED:    "대기",
+        Status.RUNNING:   "다운로드 중",
+        Status.PAUSED:    "일시정지",
+        Status.DONE:      "완료",
+        Status.ERROR:     "오류",
+        Status.CANCELLED: "취소됨",
+    }
+
+    def __init__(self, parent, job: DownloadJob, engine: DownloadEngine, main_frame):
+        super().__init__(parent, style=wx.BORDER_THEME)
+        self.job        = job
+        self.engine     = engine
+        self.main_frame = main_frame
+
+        # 카드 배경을 시스템 배경보다 약간 밝게
+        base = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
+        r = min(255, base.Red()   + 10)
+        g = min(255, base.Green() + 10)
+        b = min(255, base.Blue()  + 10)
+        self.SetBackgroundColour(wx.Colour(r, g, b))
+
+        root = wx.BoxSizer(wx.VERTICAL)
+        root.AddSpacer(10)
+
+        # ── Row 1: filename + status label ──
+        r1 = wx.BoxSizer(wx.HORIZONTAL)
+        self.lbl_name = wx.StaticText(self, label=job.filename)
+        font = self.lbl_name.GetFont()
+        font.SetWeight(wx.FONTWEIGHT_BOLD)
+        font.SetPointSize(font.GetPointSize() + 1)
+        self.lbl_name.SetFont(font)
+
+        self.lbl_status = wx.StaticText(self, label="")
+        r1.Add(self.lbl_name,  1, wx.ALIGN_CENTER_VERTICAL)
+        r1.Add(self.lbl_status, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+        root.Add(r1, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 14)
+
+        root.AddSpacer(8)
+
+        # ── Row 2: progress bar ──
+        self.gauge = wx.Gauge(self, range=1000, style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
+        self.gauge.SetMinSize((-1, 6))
+        root.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 14)
+
+        root.AddSpacer(4)
+
+        # ── Row 2b: per-segment bars (hidden until segmented download starts) ──
+        self.seg_bar = SegmentBar(self)
+        self.seg_bar.Hide()
+        root.Add(self.seg_bar, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 14)
+
+        root.AddSpacer(6)
+
+        # ── Row 3: info text + buttons ──
+        r3 = wx.BoxSizer(wx.HORIZONTAL)
+        self.lbl_info = wx.StaticText(self, label="")
+        r3.Add(self.lbl_info, 1, wx.ALIGN_CENTER_VERTICAL)
+
+        self.btn_pause  = wx.Button(self, label="⏸",  size=(32, 26))
+        self.btn_resume = wx.Button(self, label="▶",  size=(32, 26))
+        self.btn_cancel = wx.Button(self, label="✕",  size=(32, 26))
+        self.btn_reveal = wx.Button(self, label="📂", size=(32, 26))
+        self.btn_remove = wx.Button(self, label="🗑",  size=(32, 26))
+        self.btn_retry  = wx.Button(self, label="↺",  size=(32, 26))
+
+        for btn in (self.btn_pause, self.btn_resume, self.btn_cancel,
+                    self.btn_reveal, self.btn_remove, self.btn_retry):
+            r3.Add(btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+
+        root.Add(r3, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 14)
+        root.AddSpacer(10)
+
+        self.SetSizer(root)
+
+        # Bind button events
+        self.btn_pause.Bind( wx.EVT_BUTTON, lambda e: engine.pause(job))
+        self.btn_resume.Bind(wx.EVT_BUTTON, lambda e: engine.resume(job))
+        self.btn_cancel.Bind(wx.EVT_BUTTON, lambda e: engine.cancel(job))
+        self.btn_reveal.Bind(wx.EVT_BUTTON, lambda e: subprocess.Popen(["open", "-R", job.save_path]))
+        self.btn_remove.Bind(wx.EVT_BUTTON, lambda e: engine.remove(job))
+        self.btn_retry.Bind( wx.EVT_BUTTON, lambda e: (engine.remove(job),
+                                                         engine.add(job.url, job.filename,
+                                                                    job.referrer, job.cookies)))
+
+        self.refresh()
+
+    def refresh(self):
+        job = self.job
+        pct = 0.0
+        if job.total > 0 and job.downloaded > 0:
+            pct = min(job.downloaded / job.total, 1.0)
+
+        # Progress gauge (range 0–1000 for smooth rendering)
+        self.gauge.SetValue(int(pct * 1000))
+
+        # Segment bars — show only when segmented data is available
+        has_segs = bool(job.seg_sizes)
+        if has_segs != self.seg_bar.IsShown():
+            self.seg_bar.Show(has_segs)
+        if has_segs:
+            self.seg_bar.update(job)
+
+        # Status label + colour
+        colour = self.STATUS_COLOUR.get(job.status, wx.Colour(150, 150, 150))
+        self.lbl_status.SetLabel(self.STATUS_LABEL.get(job.status, ""))
+        self.lbl_status.SetForegroundColour(colour)
+
+        # Info text
+        if job.status == Status.ERROR:
+            info = f"오류: {job.error_msg[:80]}"
+        else:
+            info = human_size(job.downloaded)
+            if job.total > 0:
+                info += f" / {human_size(job.total)}  ({pct*100:.0f}%)"
+            if job.status == Status.RUNNING and job.speed > 0:
+                info += f"  ·  {human_speed(job.speed)}"
+                if job.eta >= 0:
+                    info += f"  ·  남은 시간 {human_eta(job.eta)}"
+        self.lbl_info.SetLabel(info)
+
+        # Show/hide buttons based on status
+        s = job.status
+        self.btn_pause.Show( s == Status.RUNNING)
+        self.btn_resume.Show(s == Status.PAUSED)
+        self.btn_cancel.Show(s in (Status.RUNNING, Status.PAUSED, Status.QUEUED))
+        self.btn_reveal.Show(s == Status.DONE)
+        self.btn_remove.Show(s in (Status.DONE, Status.ERROR, Status.CANCELLED))
+        self.btn_retry.Show( s == Status.ERROR)
+
+        self.Layout()
+
+
+# ── Settings dialog ───────────────────────────────────────────────────────────
+
+class SettingsDialog(wx.Dialog):
+    def __init__(self, parent, cfg: dict):
+        super().__init__(parent, title="SwiftGet 설정",
+                         style=wx.DEFAULT_DIALOG_STYLE)
+        self.cfg = dict(cfg)
+
+        root = wx.BoxSizer(wx.VERTICAL)
+        grid = wx.FlexGridSizer(cols=3, vgap=12, hgap=10)
+        grid.AddGrowableCol(1, 1)
+
+        # ── 다운로드 경로 ──
+        grid.Add(wx.StaticText(self, label="다운로드 경로:"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_dir = wx.TextCtrl(self, value=cfg["save_dir"], size=(320, -1))
+        grid.Add(self.txt_dir, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        btn_browse = wx.Button(self, label="찾아보기…", size=(90, -1))
+        grid.Add(btn_browse, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        # ── 세그먼트 수 ──
+        grid.Add(wx.StaticText(self, label="기본 세그먼트 수:"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+        self.spin_seg = wx.SpinCtrl(self, value=str(cfg["segments"]),
+                                    min=1, max=32, size=(64, -1))
+        grid.Add(self.spin_seg, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(wx.StaticText(self, label="(1 = 분할 안 함)"),
+                 0, wx.ALIGN_CENTER_VERTICAL)
+
+        root.Add(grid, 0, wx.EXPAND | wx.ALL, 20)
+
+        # ── OK / Cancel ──
+        btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+        root.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
+
+        self.SetSizerAndFit(root)
+        self.Centre()
+
+        btn_browse.Bind(wx.EVT_BUTTON, self._on_browse)
+        self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+
+    def _on_browse(self, event):
+        dlg = wx.DirDialog(self, "다운로드 경로 선택",
+                           defaultPath=self.txt_dir.GetValue(),
+                           style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST | wx.DD_NEW_DIR_BUTTON)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.txt_dir.SetValue(dlg.GetPath())
+        dlg.Destroy()
+
+    def _on_ok(self, event):
+        self.cfg["save_dir"] = self.txt_dir.GetValue().strip()
+        self.cfg["segments"] = self.spin_seg.GetValue()
+        event.Skip()
+
+    def get_config(self) -> dict:
+        return self.cfg
+
+
+# ── Main window ───────────────────────────────────────────────────────────────
+
+class SwiftGetFrame(wx.Frame):
     def __init__(self, engine: DownloadEngine):
-        super().__init__()
-        self.engine = engine
-        self.engine.on_update = self._schedule_refresh
+        super().__init__(None, title="SwiftGet", size=(780, 560),
+                         style=wx.DEFAULT_FRAME_STYLE)
+        self.engine   = engine
+        self._cards: dict[str, JobCard] = {}   # uid → JobCard
+        self._cfg     = load_config()
 
-        self.title("SwiftGet")
-        self.geometry("760x520")
-        self.minsize(600, 400)
-        self.configure(bg=DARK_BG)
+        self.engine.on_update    = self._post_refresh
+        self.engine.segments     = self._cfg["segments"]
+        self.engine.save_dir     = self._cfg["save_dir"]
 
         self._build_ui()
-        self._refresh()
+        self.Centre()
+        self.Show()
+
+        # Bind our custom refresh event
+        self.Bind(EVT_REFRESH, self._on_refresh)
+
+        # Periodic fallback refresh (every 500 ms)
+        self._timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_refresh, self._timer)
+        self._timer.Start(500)
 
     # ── UI Construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Header ──
-        hdr = tk.Frame(self, bg=DARK_BG, pady=0)
-        hdr.pack(fill=tk.X, padx=20, pady=(18, 0))
+        panel = wx.Panel(self)
+        root  = wx.BoxSizer(wx.VERTICAL)
 
-        tk.Label(hdr, text="Swift", font=("Helvetica Neue", 22, "bold"),
-                 bg=DARK_BG, fg=TEXT_PRI).pack(side=tk.LEFT)
-        tk.Label(hdr, text="Get", font=("Helvetica Neue", 22, "bold"),
-                 bg=DARK_BG, fg=ACCENT).pack(side=tk.LEFT)
+        # ── Toolbar ──
+        tb = wx.BoxSizer(wx.HORIZONTAL)
+        lbl = wx.StaticText(panel, label="Swift")
+        font = lbl.GetFont()
+        font.SetPointSize(font.GetPointSize() + 8)
+        font.SetWeight(wx.FONTWEIGHT_BOLD)
+        lbl.SetFont(font)
 
-        # Toolbar buttons
-        self._btn(hdr, "＋ URL 추가", self._add_url_dialog).pack(side=tk.RIGHT, padx=4)
-        self._btn(hdr, "폴더 열기", self._open_folder, secondary=True).pack(side=tk.RIGHT, padx=4)
-        self._btn(hdr, "완료 항목 지우기", self._clear_done, secondary=True).pack(side=tk.RIGHT, padx=4)
+        lbl2 = wx.StaticText(panel, label="Get")
+        lbl2.SetFont(font)
+        lbl2.SetForegroundColour(wx.Colour(52, 199, 89))
+
+        btn_clear    = wx.Button(panel, label="완료 항목 지우기")
+        btn_folder   = wx.Button(panel, label="폴더 열기")
+        btn_add      = wx.Button(panel, label="＋ URL 추가")
+        btn_settings = wx.Button(panel, label="⚙ 설정")
+
+        tb.Add(lbl,  0, wx.ALIGN_CENTER_VERTICAL)
+        tb.Add(lbl2, 0, wx.ALIGN_CENTER_VERTICAL)
+        tb.AddStretchSpacer()
+        tb.Add(btn_clear,    0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        tb.Add(btn_folder,   0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        tb.Add(btn_add,      0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        tb.Add(btn_settings, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        root.Add(tb, 0, wx.EXPAND | wx.ALL, 16)
 
         # ── URL quick-add bar ──
-        bar = tk.Frame(self, bg=CARD_BG, highlightbackground=BORDER, highlightthickness=1)
-        bar.pack(fill=tk.X, padx=20, pady=12)
+        url_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.url_field = wx.TextCtrl(panel, value="",
+                                     style=wx.TE_PROCESS_ENTER,
+                                     size=(-1, 30))
+        self.url_field.SetHint("URL을 여기에 붙여넣기...")
+        btn_dl = wx.Button(panel, label="다운로드", size=(-1, 30))
 
-        self._url_var = tk.StringVar()
-        ent = tk.Entry(bar, textvariable=self._url_var, bg=CARD_BG, fg=TEXT_PRI,
-                       insertbackground=ACCENT, relief=tk.FLAT,
-                       font=FONT_MONO, bd=8)
-        ent.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ent.insert(0, "URL을 여기에 붙여넣기...")
-        ent.bind("<FocusIn>",  lambda e: ent.delete(0, tk.END) if ent.get().startswith("URL") else None)
-        ent.bind("<Return>", lambda e: self._quick_add())
+        url_row.Add(self.url_field, 1, wx.ALIGN_CENTER_VERTICAL)
+        url_row.Add(btn_dl, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+        root.Add(url_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
 
-        self._btn(bar, "다운로드", self._quick_add).pack(side=tk.RIGHT, padx=8, pady=6)
+        # ── Stats label ──
+        self.lbl_stats = wx.StaticText(panel, label="대기 중...")
+        root.Add(self.lbl_stats, 0, wx.LEFT | wx.BOTTOM, 16)
 
-        # ── Stats bar ──
-        stats = tk.Frame(self, bg=DARK_BG)
-        stats.pack(fill=tk.X, padx=20, pady=(0, 8))
-        self._stat_var = tk.StringVar(value="대기 중...")
-        tk.Label(stats, textvariable=self._stat_var, font=FONT_SM,
-                 bg=DARK_BG, fg=TEXT_SEC).pack(side=tk.LEFT)
+        # ── Scrolled job list ──
+        self.scroll = scrolled.ScrolledPanel(panel, style=wx.BORDER_NONE)
+        self.scroll.SetupScrolling(scroll_x=False)
+        self.job_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.scroll.SetSizer(self.job_sizer)
 
-        # ── Scrollable job list ──
-        container = tk.Frame(self, bg=DARK_BG)
-        container.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 16))
+        # Empty state label
+        self.lbl_empty = wx.StaticText(self.scroll, label="다운로드 항목이 없습니다")
+        font_e = self.lbl_empty.GetFont()
+        font_e.SetPointSize(font_e.GetPointSize() - 1)
+        self.lbl_empty.SetFont(font_e)
+        self.lbl_empty.SetForegroundColour(wx.Colour(150, 150, 150))
+        self.job_sizer.Add(self.lbl_empty, 0, wx.ALL, 20)
 
-        canvas = tk.Canvas(container, bg=DARK_BG, bd=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
-        self._list_frame = tk.Frame(canvas, bg=DARK_BG)
+        root.Add(self.scroll, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
 
-        self._list_frame.bind("<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        panel.SetSizer(root)
 
-        canvas.create_window((0, 0), window=self._list_frame, anchor=tk.NW)
-        canvas.configure(yscrollcommand=scrollbar.set)
+        # Events
+        btn_add.Bind(     wx.EVT_BUTTON,    self._on_add_url)
+        btn_clear.Bind(   wx.EVT_BUTTON,    self._on_clear_done)
+        btn_folder.Bind(  wx.EVT_BUTTON,    lambda e: subprocess.Popen(["open", self.engine.save_dir]))
+        btn_settings.Bind(wx.EVT_BUTTON,    self._on_settings)
+        btn_dl.Bind(      wx.EVT_BUTTON,    self._on_quick_add)
+        self.url_field.Bind(wx.EVT_TEXT_ENTER, self._on_quick_add)
 
-        # 캔버스 너비에 맞춰 내부 프레임 너비 동기화 (카드 레이아웃 정상화)
-        def _on_canvas_resize(event):
-            canvas.itemconfig(canvas.find_withtag("all")[0], width=event.width)
-        canvas.bind("<Configure>", _on_canvas_resize)
+    # ── Refresh ───────────────────────────────────────────────────────────────
 
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    def _post_refresh(self):
+        """Called from background threads — safely posts to the main thread."""
+        evt = RefreshEvent()
+        evt.SetEventObject(self)
+        wx.PostEvent(self, evt)
 
-        self._canvas = canvas
-
-    def _btn(self, parent, text, cmd, secondary=False):
-        bg  = CARD_BG if secondary else ACCENT
-        fg  = TEXT_PRI if secondary else DARK_BG
-        b   = tk.Button(parent, text=text, command=cmd,
-                         bg=bg, fg=fg, relief=tk.FLAT,
-                         font=("Helvetica Neue", 11, "bold"),
-                         padx=12, pady=5, cursor="hand2",
-                         activebackground=ACCENT if not secondary else BORDER,
-                         activeforeground=DARK_BG)
-        return b
-
-    # ── Refresh / Rendering ───────────────────────────────────────────────────
-
-    def _schedule_refresh(self):
-        self.after(0, self._refresh)
-
-    def _refresh(self):
-        # Clear
-        for w in self._list_frame.winfo_children():
-            w.destroy()
-
+    def _on_refresh(self, event=None):
         jobs = list(self.engine.jobs)
-        if not jobs:
-            tk.Label(self._list_frame, text="다운로드 항목이 없습니다",
-                     font=FONT_SM, bg=DARK_BG, fg=TEXT_SEC, pady=40).pack()
-        else:
-            for job in jobs:
-                self._render_job(job)
+        existing_uids = set(self._cards.keys())
+        job_uids      = {j.uid for j in jobs}
 
-        # Stats
+        # Remove cards for deleted jobs
+        for uid in existing_uids - job_uids:
+            card = self._cards.pop(uid)
+            self.job_sizer.Detach(card)
+            card.Destroy()
+
+        # Add cards for new jobs; refresh existing
+        for job in jobs:
+            if job.uid not in self._cards:
+                card = JobCard(self.scroll, job, self.engine, self)
+                self._cards[job.uid] = card
+                self.job_sizer.Add(card, 0, wx.EXPAND | wx.BOTTOM, 8)
+            else:
+                self._cards[job.uid].refresh()
+
+        # Empty state
+        self.lbl_empty.Show(len(jobs) == 0)
+
+        # Stats bar
         running = sum(1 for j in jobs if j.status == Status.RUNNING)
         done    = sum(1 for j in jobs if j.status == Status.DONE)
-        total   = len(jobs)
         speed   = sum(j.speed for j in jobs if j.status == Status.RUNNING)
-        self._stat_var.set(
-            f"전체 {total}개  •  실행 중 {running}개  •  완료 {done}개"
-            + (f"  •  ↓ {human_speed(speed)}" if speed > 0 else "")
-        )
+        stat    = f"전체 {len(jobs)}개  ·  실행 중 {running}개  ·  완료 {done}개  ·  세그먼트 {self.engine.segments}개"
+        if speed > 0:
+            stat += f"  ·  ↓ {human_speed(speed)}"
+        self.lbl_stats.SetLabel(stat)
 
-    def _render_job(self, job: DownloadJob):
-        card = tk.Frame(self._list_frame, bg=CARD_BG,
-                        highlightbackground=BORDER, highlightthickness=1)
-        card.pack(fill=tk.X, pady=4)
-
-        inner = tk.Frame(card, bg=CARD_BG, padx=14, pady=10)
-        inner.pack(fill=tk.X)
-
-        # Row 1: filename + status badge
-        r1 = tk.Frame(inner, bg=CARD_BG)
-        r1.pack(fill=tk.X)
-
-        status_color = {
-            Status.QUEUED:    TEXT_SEC,
-            Status.RUNNING:   ACCENT,
-            Status.PAUSED:    PAUSE_COL,
-            Status.DONE:      ACCENT,
-            Status.ERROR:     ERROR_COL,
-            Status.CANCELLED: TEXT_SEC,
-        }.get(job.status, TEXT_SEC)
-
-        status_label = {
-            Status.QUEUED:    "대기",
-            Status.RUNNING:   "다운로드 중",
-            Status.PAUSED:    "일시정지",
-            Status.DONE:      "완료",
-            Status.ERROR:     "오류",
-            Status.CANCELLED: "취소됨",
-        }.get(job.status, "")
-
-        tk.Label(r1, text=job.filename, font=FONT_HEAD,
-                 bg=CARD_BG, fg=TEXT_PRI, anchor=tk.W).pack(side=tk.LEFT)
-        tk.Label(r1, text=status_label, font=FONT_SM,
-                 bg=CARD_BG, fg=status_color).pack(side=tk.RIGHT)
-
-        # Row 2: progress bar
-        pct = 0
-        if job.total > 0 and job.downloaded > 0:
-            pct = min(job.downloaded / job.total, 1.0)
-
-        bar_frame = tk.Frame(inner, bg=BORDER, height=4)
-        bar_frame.pack(fill=tk.X, pady=(6, 4))
-
-        fill_color = {
-            Status.PAUSED: PAUSE_COL,
-            Status.ERROR:  ERROR_COL,
-            Status.DONE:   ACCENT,
-        }.get(job.status, ACCENT)
-
-        if pct > 0:
-            bar_frame.update_idletasks()
-            fill_w = int(bar_frame.winfo_reqwidth() * pct) or 1
-            tk.Frame(bar_frame, bg=fill_color, height=4, width=fill_w).place(x=0, y=0, relwidth=pct)
-
-        # Row 3: size info + speed + ETA + buttons
-        r3 = tk.Frame(inner, bg=CARD_BG)
-        r3.pack(fill=tk.X)
-
-        info = f"{human_size(job.downloaded)}"
-        if job.total > 0:
-            info += f" / {human_size(job.total)}  ({pct*100:.0f}%)"
-        if job.status == Status.RUNNING and job.speed > 0:
-            info += f"  •  {human_speed(job.speed)}"
-            if job.eta >= 0:
-                info += f"  •  남은 시간 {human_eta(job.eta)}"
-        if job.status == Status.ERROR:
-            info = f"오류: {job.error_msg[:60]}"
-
-        tk.Label(r3, text=info, font=FONT_SM, bg=CARD_BG, fg=TEXT_SEC).pack(side=tk.LEFT)
-
-        # Action buttons
-        btn_frame = tk.Frame(r3, bg=CARD_BG)
-        btn_frame.pack(side=tk.RIGHT)
-
-        if job.status == Status.RUNNING:
-            self._mini_btn(btn_frame, "⏸", lambda j=job: self.engine.pause(j)).pack(side=tk.LEFT, padx=2)
-        if job.status == Status.PAUSED:
-            self._mini_btn(btn_frame, "▶", lambda j=job: self.engine.resume(j)).pack(side=tk.LEFT, padx=2)
-        if job.status in (Status.RUNNING, Status.PAUSED, Status.QUEUED):
-            self._mini_btn(btn_frame, "✕", lambda j=job: self.engine.cancel(j), danger=True).pack(side=tk.LEFT, padx=2)
-        if job.status == Status.DONE:
-            self._mini_btn(btn_frame, "📂", lambda p=job.save_path: self._reveal(p)).pack(side=tk.LEFT, padx=2)
-        if job.status in (Status.DONE, Status.ERROR, Status.CANCELLED):
-            self._mini_btn(btn_frame, "🗑", lambda j=job: self.engine.remove(j), danger=True).pack(side=tk.LEFT, padx=2)
-        if job.status == Status.ERROR:
-            self._mini_btn(btn_frame, "↺", lambda j=job: self._retry(j)).pack(side=tk.LEFT, padx=2)
-
-    def _mini_btn(self, parent, text, cmd, danger=False):
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=CARD_BG, fg=ERROR_COL if danger else TEXT_SEC,
-                         relief=tk.FLAT, font=FONT_SM,
-                         padx=6, pady=2, cursor="hand2",
-                         activebackground=BORDER, activeforeground=TEXT_PRI)
+        self.scroll.FitInside()
+        self.scroll.Layout()
+        self.scroll.Refresh()
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
-    def _quick_add(self):
-        url = self._url_var.get().strip()
-        if url and url.startswith("http"):
+    def _on_quick_add(self, event=None):
+        url = self.url_field.GetValue().strip()
+        if url.startswith("http"):
             self.engine.add(url)
-            self._url_var.set("")
+            self.url_field.SetValue("")
 
-    def _add_url_dialog(self):
-        dlg = tk.Toplevel(self, bg=DARK_BG)
-        dlg.title("URL 추가")
-        dlg.geometry("500x120")
-        dlg.resizable(False, False)
-        dlg.transient(self)
-        dlg.grab_set()
-
-        tk.Label(dlg, text="다운로드 URL:", font=FONT_SM,
-                 bg=DARK_BG, fg=TEXT_SEC).pack(anchor=tk.W, padx=16, pady=(14, 4))
-        var = tk.StringVar()
-        ent = tk.Entry(dlg, textvariable=var, bg=CARD_BG, fg=TEXT_PRI,
-                       insertbackground=ACCENT, relief=tk.FLAT,
-                       font=FONT_MONO, bd=8)
-        ent.pack(fill=tk.X, padx=16)
-        ent.focus()
-
-        def add():
-            url = var.get().strip()
+    def _on_add_url(self, event):
+        dlg = wx.TextEntryDialog(self, "다운로드 URL:", "URL 추가", "")
+        if dlg.ShowModal() == wx.ID_OK:
+            url = dlg.GetValue().strip()
             if url.startswith("http"):
                 self.engine.add(url)
-                dlg.destroy()
+        dlg.Destroy()
 
-        ent.bind("<Return>", lambda e: add())
-        self._btn(dlg, "다운로드", add).pack(side=tk.RIGHT, padx=16, pady=10)
+    def _on_settings(self, event):
+        dlg = SettingsDialog(self, self._cfg)
+        if dlg.ShowModal() == wx.ID_OK:
+            self._cfg = dlg.get_config()
+            save_config(self._cfg)
+            self.engine.segments = self._cfg["segments"]
+            self.engine.save_dir = self._cfg["save_dir"]
+        dlg.Destroy()
 
-    def _open_folder(self):
-        subprocess.Popen(["open", SAVE_DIR])
-
-    def _reveal(self, path):
-        subprocess.Popen(["open", "-R", path])
-
-    def _retry(self, job: DownloadJob):
-        self.engine.remove(job)
-        self.engine.add(job.url, job.filename, job.referrer, job.cookies)
-
-    def _clear_done(self):
+    def _on_clear_done(self, event):
         for j in list(self.engine.jobs):
             if j.status in (Status.DONE, Status.ERROR, Status.CANCELLED):
                 self.engine.remove(j)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# macOS Menu Bar (rumps)
-# ─────────────────────────────────────────────────────────────────────────────
+    def bring_to_front(self):
+        wx.CallAfter(self._do_bring_to_front)
 
-import AppKit
-import objc
+    def _do_bring_to_front(self):
+        if self.IsIconized():
+            self.Restore()
+        self.Show()
+        self.Raise()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# macOS Menu Bar (AppKit — same as before)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class StatusBarController:
-    """macOS 메뉴바 아이콘 (AppKit 직접 사용, rumps 없이)"""
-    def __init__(self, tk_app: 'SwiftGetApp'):
-        self.tk_app = tk_app
+    def __init__(self, frame: SwiftGetFrame):
+        self.frame = frame
         self._bar  = AppKit.NSStatusBar.systemStatusBar()
         self._item = self._bar.statusItemWithLength_(AppKit.NSVariableStatusItemLength)
         self._item.setTitle_("SwiftGet")
@@ -637,44 +812,21 @@ class StatusBarController:
         )
 
     def showWindow_(self, sender):
-        self.tk_app.after(0, lambda: (
-            self.tk_app.deiconify(),
-            self.tk_app.lift(),
-            self.tk_app.focus_force()
-        ))
+        self.frame.bring_to_front()
 
     def openFolder_(self, sender):
-        import subprocess
         subprocess.Popen(["open", SAVE_DIR])
 
     def quitApp_(self, sender):
-        AppKit.NSApplication.sharedApplication().terminate_(None)
+        wx.GetApp().ExitMainLoop()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Unix Socket Server (receives jobs from native host)
+# Unix Socket Server
 # ─────────────────────────────────────────────────────────────────────────────
 
-def bring_to_front(tk_app):
-    """macOS에서 창을 최전면으로 가져오기"""
-    try:
-        subprocess.Popen([
-            "osascript", "-e",
-            'tell application "System Events" to set frontmost of every process whose name contains "Python" to true'
-        ])
-    except Exception as e:
-        logging.warning(f"osascript failed: {e}")
-    tk_app.after(0, lambda: (
-        tk_app.deiconify(),
-        tk_app.lift(),
-        tk_app.attributes("-topmost", True),
-        tk_app.after(200, lambda: tk_app.attributes("-topmost", False)),
-        tk_app.focus_force()
-    ))
-
-def start_socket_server(engine: DownloadEngine, tk_app: SwiftGetApp):
+def start_socket_server(engine: DownloadEngine, frame: SwiftGetFrame):
     if os.path.exists(SOCKET_PATH):
         os.remove(SOCKET_PATH)
-
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(SOCKET_PATH)
     server.listen(5)
@@ -685,26 +837,19 @@ def start_socket_server(engine: DownloadEngine, tk_app: SwiftGetApp):
             raw_len = conn.recv(4)
             if len(raw_len) < 4: return
             length = struct.unpack(">I", raw_len)[0]
-            data   = b""
+            data = b""
             while len(data) < length:
                 chunk = conn.recv(length - len(data))
                 if not chunk: break
                 data += chunk
             msg = json.loads(data.decode("utf-8"))
             logging.info(f"Socket message: {msg.get('action')}")
-
             if msg.get("action") == "download":
-                engine.add(
-                    url=msg["url"],
-                    filename=msg.get("filename", ""),
-                    referrer=msg.get("referrer", ""),
-                    cookies=msg.get("cookies", ""),
-                )
-                bring_to_front(tk_app)
-
+                engine.add(url=msg["url"], filename=msg.get("filename", ""),
+                            referrer=msg.get("referrer", ""), cookies=msg.get("cookies", ""))
+                frame.bring_to_front()
             elif msg.get("action") == "focus":
-                bring_to_front(tk_app)
-
+                frame.bring_to_front()
         except Exception as e:
             logging.error(f"Socket handler error: {e}")
         finally:
@@ -722,19 +867,58 @@ def start_socket_server(engine: DownloadEngine, tk_app: SwiftGetApp):
     threading.Thread(target=serve, daemon=True).start()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Native Messaging 자동 등록
+# ─────────────────────────────────────────────────────────────────────────────
+
+def register_native_messaging():
+    """첫 실행 시 Firefox Native Messaging 매니페스트를 자동 등록."""
+    manifest_dir  = os.path.expanduser(
+        "~/Library/Application Support/Mozilla/NativeMessagingHosts")
+    manifest_path = os.path.join(manifest_dir, "app.swiftget.downloader.json")
+
+    # 앱 번들 내 실제 host 스크립트 경로
+    exe_dir   = os.path.dirname(os.path.abspath(sys.argv[0]))
+    host_path = os.path.join(exe_dir, "swiftget-host")
+
+    manifest = {
+        "name":               "app.swiftget.downloader",
+        "description":        "SwiftGet Download Manager Native Host",
+        "path":               host_path,
+        "type":               "stdio",
+        "allowed_extensions": ["swiftget@downloader.app"]
+    }
+
+    try:
+        # 이미 동일한 내용이면 스킵
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as f:
+                existing = json.load(f)
+            if existing.get("path") == host_path:
+                return
+
+        os.makedirs(manifest_dir, exist_ok=True)
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+        logging.info(f"Native Messaging 매니페스트 등록 완료: {manifest_path}")
+    except Exception as e:
+        logging.warning(f"Native Messaging 등록 실패: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry Point
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    register_native_messaging()
+
+    app    = wx.App(False)
     engine = DownloadEngine(on_update=lambda: None)
-    tk_app = SwiftGetApp(engine)
+    frame  = SwiftGetFrame(engine)
 
-    start_socket_server(engine, tk_app)
+    start_socket_server(engine, frame)
 
-    # 메뉴바 (AppKit, 메인 스레드에서 초기화)
-    status_bar = StatusBarController(tk_app)
+    status_bar = StatusBarController(frame)
 
-    # 메뉴바 속도 업데이트
     def update_loop():
         while True:
             time.sleep(1)
@@ -742,11 +926,12 @@ def main():
             speed   = sum(j.speed for j in engine.jobs if j.status == Status.RUNNING)
             try:
                 status_bar.update_title(running, speed)
-            except: pass
+            except:
+                pass
 
     threading.Thread(target=update_loop, daemon=True).start()
 
-    tk_app.mainloop()
+    app.MainLoop()
 
 if __name__ == "__main__":
     main()

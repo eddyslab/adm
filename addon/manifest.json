@@ -1,11 +1,12 @@
 {
   "manifest_version": 2,
   "name": "SwiftGet Download Manager",
-  "version": "1.0.0",
-  "description": "Intercepts downloads and sends them to SwiftGet native app",
+  "version": "1.1.0",
+  "description": "링크를 우클릭하여 SwiftGet으로 다운로드",
 
   "permissions": [
-    "downloads",
+    "contextMenus",
+    "cookies",
     "nativeMessaging",
     "tabs",
     "notifications"

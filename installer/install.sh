@@ -1,119 +1,162 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────────────────────
-# SwiftGet Installer for macOS
-# Usage: bash install.sh
-# ─────────────────────────────────────────────────────────────────────────────
+# SwiftGet DMG Builder
+# Usage: bash installer/install.sh
 
 set -euo pipefail
 
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
-info()  { echo -e "${CYAN}▶  $*${NC}"; }
-ok()    { echo -e "${GREEN}✓  $*${NC}"; }
-err()   { echo -e "${RED}✗  $*${NC}"; exit 1; }
+info()  { echo -e "${CYAN}>>  $*${NC}"; }
+ok()    { echo -e "${GREEN}OK  $*${NC}"; }
+err()   { echo -e "${RED}!!  $*${NC}"; exit 1; }
 
-# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 NATIVE_APP_DIR="$SCRIPT_DIR/native-app"
 ADDON_DIR="$SCRIPT_DIR/addon"
-APP_SUPPORT="$HOME/Library/Application Support/SwiftGet"
-LOG_DIR="$HOME/Library/Logs/SwiftGet"
-
-# Native Messaging host manifest location for Firefox
-NATIVE_MSG_DIR="$HOME/Library/Application Support/Mozilla/NativeMessagingHosts"
+DIST_DIR="$SCRIPT_DIR/dist"
+DMG_STAGING="$DIST_DIR/dmg-staging"
+DMG_PATH="$DIST_DIR/SwiftGet.dmg"
 
 echo ""
-echo "  ╔══════════════════════════════════╗"
-echo "  ║     SwiftGet Installer v1.0      ║"
-echo "  ╚══════════════════════════════════╝"
+echo "  SwiftGet DMG Builder v1.2"
 echo ""
 
-# ── Step 1: Check Python 3 ──────────────────────────────────────────────────
-info "Python 3 확인 중..."
-if ! command -v python3 &>/dev/null; then
-  err "Python 3가 필요합니다. https://python.org 에서 설치하세요."
-fi
+# Step 1: Python
+info "Python 3 check..."
+command -v python3 &>/dev/null || err "Python 3 required"
 PY_VER=$(python3 --version 2>&1 | cut -d' ' -f2)
-ok "Python $PY_VER 발견"
+ok "Python $PY_VER"
 
-# ── Step 2: Install Python dependencies ─────────────────────────────────────
-info "Python 패키지 설치 중..."
-pip3 install --quiet rumps py2app
-ok "패키지 설치 완료"
+# Step 2: packages
+info "Installing packages..."
+pip3 install --quiet wxPython py2app
+ok "Packages ready"
 
-# ── Step 3: Create directories ───────────────────────────────────────────────
-info "디렉토리 생성 중..."
-mkdir -p "$APP_SUPPORT" "$LOG_DIR" "$NATIVE_MSG_DIR"
-ok "디렉토리 생성 완료"
+# Step 3: icon
+info "Checking icon..."
+ICON_PATH="$NATIVE_APP_DIR/icons/SwiftGet.icns"
+[ -f "$ICON_PATH" ] || err "Icon not found: $ICON_PATH"
+ok "Icon found"
 
-# ── Step 4: Build .app bundle ────────────────────────────────────────────────
-info "SwiftGet.app 빌드 중 (시간이 걸릴 수 있습니다)..."
+# Step 4: patch py2app to disable strip, then build
+info "Building SwiftGet.app..."
 cd "$NATIVE_APP_DIR"
+rm -rf build dist
+
+# Write patch script to temp file
+PATCH_PY="$(mktemp /tmp/swiftget_patch_XXXX.py)"
+cat > "$PATCH_PY" << 'PATCHEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, "r") as f:
+    lines = f.readlines()
+
+patched = []
+for line in lines:
+    s = line.strip()
+    # strip 을 실제 실행하는 라인 모두 pass 로 교체
+    is_strip_call = (
+        "strip" in s and
+        not s.startswith("#") and
+        "def " not in s and
+        ("spawnl" in s or "spawnv" in s or
+         "subprocess" in s or "os.system" in s or
+         "Popen" in s or "call(" in s or
+         "run(" in s)
+    )
+    if is_strip_call:
+        indent = len(line) - len(line.lstrip())
+        patched.append(" " * indent + "pass  # strip disabled\n")
+        print("  patched: " + s)
+    else:
+        patched.append(line)
+
+with open(path, "w") as f:
+    f.writelines(patched)
+
+print("Done: " + path)
+PATCHEOF
+
+PY2APP_FILE="$(python3 -c "import py2app.build_app as m; print(m.__file__)")"
+[ -n "$PY2APP_FILE" ] || err "py2app not found"
+
+cp "$PY2APP_FILE" "${PY2APP_FILE}.bak"
+python3 "$PATCH_PY" "$PY2APP_FILE"
+rm -f "$PATCH_PY"
+
 python3 setup.py py2app --quiet 2>&1 | tail -5
+
+# Restore py2app
+mv "${PY2APP_FILE}.bak" "$PY2APP_FILE"
+
 APP_PATH="$NATIVE_APP_DIR/dist/SwiftGet.app"
-if [ ! -d "$APP_PATH" ]; then
-  err ".app 빌드 실패. 로그를 확인하세요."
-fi
-ok "SwiftGet.app 빌드 완료"
+[ -d "$APP_PATH" ] || err "Build failed"
+ok "SwiftGet.app built"
 
-# ── Step 5: Copy .app to /Applications ──────────────────────────────────────
-info "/Applications 에 설치 중..."
-rm -rf "/Applications/SwiftGet.app"
-cp -R "$APP_PATH" "/Applications/SwiftGet.app"
-ok "설치 완료: /Applications/SwiftGet.app"
+# Step 5: force icon into bundle
+info "Applying icon..."
+cp "$ICON_PATH" "$APP_PATH/Contents/Resources/SwiftGet.icns"
+/usr/libexec/PlistBuddy -c \
+  "Set :CFBundleIconFile SwiftGet" \
+  "$APP_PATH/Contents/Info.plist" 2>/dev/null || \
+/usr/libexec/PlistBuddy -c \
+  "Add :CFBundleIconFile string SwiftGet" \
+  "$APP_PATH/Contents/Info.plist"
+touch "$APP_PATH"
+ok "Icon applied"
 
-# ── Step 6: Create native host wrapper script ────────────────────────────────
-HOST_SCRIPT="/Applications/SwiftGet.app/Contents/MacOS/swiftget-host"
-info "Native Messaging 호스트 스크립트 생성 중..."
+# Step 6: native host script
+info "Installing native host..."
+HOST_SCRIPT="$APP_PATH/Contents/MacOS/swiftget-host"
 cat > "$HOST_SCRIPT" << 'HOSTEOF'
 #!/usr/bin/env python3
-# Auto-generated native messaging host wrapper
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Resources', 'lib', 'python3.x', 'site-packages'))
-# Locate and run the host script
 host = os.path.join(os.path.dirname(__file__), '..', 'Resources', 'swiftget-host.py')
 exec(open(host).read())
 HOSTEOF
 chmod +x "$HOST_SCRIPT"
-
-# Copy host script into .app bundle
 cp "$NATIVE_APP_DIR/swiftget-host.py" \
-   "/Applications/SwiftGet.app/Contents/Resources/swiftget-host.py"
-ok "Native Messaging 호스트 설치 완료"
+   "$APP_PATH/Contents/Resources/swiftget-host.py"
+ok "Native host ready"
 
-# ── Step 7: Register Native Messaging manifest ───────────────────────────────
-info "Firefox Native Messaging 매니페스트 등록 중..."
-cat > "$NATIVE_MSG_DIR/app.swiftget.downloader.json" << EOF
-{
-  "name": "app.swiftget.downloader",
-  "description": "SwiftGet Download Manager Native Host",
-  "path": "/Applications/SwiftGet.app/Contents/MacOS/swiftget-host",
-  "type": "stdio",
-  "allowed_extensions": ["swiftget@downloader.app"]
-}
-EOF
-ok "매니페스트 등록: $NATIVE_MSG_DIR/app.swiftget.downloader.json"
-
-# ── Step 8: Package Firefox addon as .xpi ───────────────────────────────────
-info "Firefox 애드온 패키징 중..."
-XPI_PATH="$SCRIPT_DIR/swiftget.xpi"
+# Step 7: package addon
+info "Packaging Firefox addon..."
+XPI_PATH="$NATIVE_APP_DIR/dist/SwiftGet.xpi"
 cd "$ADDON_DIR"
 zip -r "$XPI_PATH" . -x "*.DS_Store" -x "__MACOSX/*" > /dev/null
-ok "애드온 패키징 완료: $XPI_PATH"
+ok "SwiftGet.xpi ready"
 
-# ── Done ─────────────────────────────────────────────────────────────────────
+# Step 8: build DMG
+info "Building DMG..."
+mkdir -p "$DMG_STAGING"
+rm -rf "$DMG_STAGING"/*
+
+cp -R "$APP_PATH" "$DMG_STAGING/SwiftGet.app"
+cp    "$XPI_PATH" "$DMG_STAGING/SwiftGet.xpi"
+ln -sf /Applications "$DMG_STAGING/Applications"
+
+cat > "$DMG_STAGING/README.txt" << 'READMEEOF'
+SwiftGet Installation
+
+1. Drag SwiftGet.app to the Applications folder.
+2. Launch SwiftGet.app once.
+   (If blocked: System Settings > Privacy & Security > Open Anyway)
+3. In Firefox: about:addons > gear icon > Install Add-on From File
+   Select SwiftGet.xpi
+READMEEOF
+
+mkdir -p "$DIST_DIR"
+rm -f "$DMG_PATH"
+
+hdiutil create \
+  -volname "SwiftGet" \
+  -srcfolder "$DMG_STAGING" \
+  -ov -format UDZO -fs HFS+ \
+  "$DMG_PATH" > /dev/null
+
+rm -rf "$DMG_STAGING"
+ok "DMG created: $DMG_PATH"
+
 echo ""
-echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}  설치 완료! 다음 단계를 진행하세요:${NC}"
-echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-echo "  1. SwiftGet.app 을 처음 한 번 실행하세요:"
-echo "     open /Applications/SwiftGet.app"
-echo ""
-echo "  2. Firefox 에서 애드온을 설치하세요:"
-echo "     about:addons → 톱니바퀴 → 파일에서 부가 기능 설치"
-echo "     파일 선택: $XPI_PATH"
-echo ""
-echo "  3. (선택) macOS 보안 설정에서 앱 허용:"
-echo "     시스템 설정 → 개인정보 보호 및 보안 → 허용"
+echo "  Done! Distribute: $DMG_PATH"
 echo ""
