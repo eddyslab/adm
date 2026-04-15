@@ -67,6 +67,15 @@ def save_config(cfg: dict):
     except Exception as e:
         logging.warning(f"Config save failed: {e}")
 
+def send_notification(title: str, message: str):
+    """macOS 알림 센터에 알림 전송."""
+    try:
+        import subprocess
+        script = f'display notification "{message}" with title "{title}"'
+        subprocess.run(["osascript", "-e", script], check=False)
+    except Exception as e:
+        logging.warning(f"알림 전송 실패: {e}")
+
 _cfg     = load_config()
 SAVE_DIR = _cfg["save_dir"]
 SEGMENTS = _cfg["segments"]
@@ -165,6 +174,15 @@ class DownloadEngine:
             if not job._cancel_evt.is_set():
                 job.status = Status.DONE
                 job.speed  = 0
+
+                # 알림 전송
+                cfg = load_config()
+                if cfg.get("notify_on_complete", True):
+                    fname = os.path.basename(job.filename) if job.filename else job.url
+                    if len(fname) > 40:
+                        fname = fname[:37] + "..."
+                    send_notification("SwiftGet", f"다운로드 완료: {fname}")
+
         except Exception as e:
             job.status = Status.CANCELLED if job._cancel_evt.is_set() else Status.ERROR
             if job.status == Status.ERROR:
