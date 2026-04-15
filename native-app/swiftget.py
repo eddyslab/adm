@@ -984,16 +984,12 @@ def register_native_messaging():
         "~/Library/Application Support/Mozilla/NativeMessagingHosts")
     manifest_path = os.path.join(manifest_dir, "app.swiftget.downloader.json")
 
-    # 앱 번들 내 실제 host 스크립트 경로
-    # sys.argv[0] 이 Resources 폴더를 가리킬 수 있으므로 MacOS 폴더를 명시적으로 탐색
-    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    # Resources → Contents → MacOS 순으로 탐색
-    macos_dir = os.path.join(exe_dir, "..", "..", "MacOS")
-    macos_dir = os.path.normpath(macos_dir)
-    if os.path.isdir(macos_dir):
-        host_path = os.path.join(macos_dir, "swiftget-host")
-    else:
-        host_path = os.path.join(exe_dir, "swiftget-host")
+    # 번들 내 MacOS 폴더를 확실하게 찾기
+    # __file__ 은 Resources/swiftget.py 를 가리킴
+    resources_dir = os.path.dirname(os.path.abspath(__file__))
+    contents_dir  = os.path.dirname(resources_dir)
+    macos_dir     = os.path.join(contents_dir, "MacOS")
+    host_path     = os.path.join(macos_dir, "swiftget-host")        
 
     manifest = {
         "name":               "app.swiftget.downloader",
