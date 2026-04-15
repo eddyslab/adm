@@ -77,6 +77,54 @@ with open(path, "w") as f:
 print("Done: " + path)
 PATCHEOF
 
+# MachOStandalone.py 패치 — 서명된 파일 건너뛰기
+MACHO_PATCH_PY="$(mktemp /tmp/swiftget_macho_patch_XXXX.py)"
+cat > "$MACHO_PATCH_PY" << 'MACHOEOF'
+import sys, re
+
+path = sys.argv[1]
+with open(path, "r") as f:
+    src = f.read()
+
+old = """            if rewroteAny:
+                old_mode = flipwritable(fn)
+                try:
+                    with open(fn, "rb+") as f:
+                        for _header in node.headers:
+                            f.seek(0)
+                            node.write(f)
+                        f.seek(0, 2)
+                        f.flush()
+                finally:
+                    flipwritable(fn, old_mode)"""
+
+new = """            if rewroteAny:
+                try:
+                    old_mode = flipwritable(fn)
+                except Exception:
+                    # Apple 서명된 바이너리는 수정 불가 — 건너뜀
+                    continue
+                try:
+                    with open(fn, "rb+") as f:
+                        for _header in node.headers:
+                            f.seek(0)
+                            node.write(f)
+                        f.seek(0, 2)
+                        f.flush()
+                except Exception:
+                    pass
+                finally:
+                    flipwritable(fn, old_mode)"""
+
+if old in src:
+    src = src.replace(old, new)
+    with open(path, "w") as f:
+        f.write(src)
+    print("Patched MachOStandalone: " + path)
+else:
+    print("Pattern not found in: " + path)
+MACHOEOF
+
 PY2APP_FILE="$(python3 -c "import py2app.build_app as m; print(m.__file__)")"
 [ -n "$PY2APP_FILE" ] || err "py2app not found"
 
@@ -84,10 +132,23 @@ cp "$PY2APP_FILE" "${PY2APP_FILE}.bak"
 python3 "$PATCH_PY" "$PY2APP_FILE"
 rm -f "$PATCH_PY"
 
-python3 setup.py py2app --quiet 2>&1 | tail -5
+# MachOStandalone.py 패치 — 서명된 바이너리 건너뛰기
+MACHO_FILE="$(python3 -c "import macholib.MachOStandalone as m; print(m.__file__)")"
+if [ -n "$MACHO_FILE" ]; then
+  cp "$MACHO_FILE" "${MACHO_FILE}.bak"
+  python3 "$MACHO_PATCH_PY" "$MACHO_FILE"
+fi
+rm -f "$MACHO_PATCH_PY"
 
-# Restore py2app
+# Python3.framework 쓰기 권한 허용 (strip 권한 오류 방지)
+PY_FW="$(python3 -c "import sys; print(sys.prefix)")"
+find "$PY_FW" -type f \( -name "*.dylib" -o -name "Python3" -o -name "Python" \)     -exec chmod u+w {} + 2>/dev/null || true
+
+python3 setup_dist.py py2app --quiet 2>&1 | tail -5
+
+# Restore py2app + MachOStandalone
 mv "${PY2APP_FILE}.bak" "$PY2APP_FILE"
+[ -f "${MACHO_FILE}.bak" ] && mv "${MACHO_FILE}.bak" "$MACHO_FILE"
 
 APP_PATH="$NATIVE_APP_DIR/dist/SwiftGet.app"
 [ -d "$APP_PATH" ] || err "Build failed"

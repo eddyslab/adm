@@ -1037,13 +1037,102 @@ def main():
 
     status_bar = StatusBarController(frame)
 
+    def update_dock_progress(pct: float, visible: bool):
+        """Dock 아이콘 하단에 프로그레스 바 표시 (AppKit NSDockTile)."""
+        try:
+            app_kit = AppKit.NSApplication.sharedApplication()
+            dock_tile = app_kit.dockTile()
+            if visible and 0.0 <= pct <= 1.0:
+                AppKit.NSApp.setApplicationIconImage_(AppKit.NSApp.applicationIconImage())
+                # NSDockTile progress via badgeLabel trick — use NSProgress
+                # macOS 10.12+ 에서 지원하는 NSDockTile.showsApplicationBadge 대신
+                # NSProgressIndicator 를 dockTile contentView 에 올리는 방식 사용
+                content_view = dock_tile.contentView()
+                if content_view is None:
+                    # 아이콘 이미지를 contentView 로 설정
+                    icon = AppKit.NSApp.applicationIconImage()
+                    image_view = AppKit.NSImageView.alloc().initWithFrame_(
+                        AppKit.NSMakeRect(0, 0, 128, 128)
+                    )
+                    image_view.setImage_(icon)
+                    dock_tile.setContentView_(image_view)
+                    content_view = image_view
+
+                # 진행바 레이어를 그려서 dockTile 갱신
+                icon_size = 128
+                bar_h = 12
+                bar_y = 4
+                bar_x = 8
+                bar_w = icon_size - bar_x * 2
+
+                image = AppKit.NSImage.alloc().initWithSize_(
+                    AppKit.NSMakeSize(icon_size, icon_size)
+                )
+                image.lockFocus()
+
+                # 앱 아이콘 그리기
+                app_icon = AppKit.NSApp.applicationIconImage()
+                app_icon.drawInRect_(AppKit.NSMakeRect(0, 0, icon_size, icon_size))
+
+                # 진행바 배경 (회색)
+                bg = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    0.3, 0.3, 0.3, 0.85)
+                bg.setFill()
+                AppKit.NSBezierPath.fillRect_(
+                    AppKit.NSMakeRect(bar_x, bar_y, bar_w, bar_h))
+
+                # 진행바 채우기 (녹색)
+                fill_w = bar_w * pct
+                fg = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    0.2, 0.78, 0.35, 1.0)
+                fg.setFill()
+                AppKit.NSBezierPath.fillRect_(
+                    AppKit.NSMakeRect(bar_x, bar_y, fill_w, bar_h))
+
+                image.unlockFocus()
+                dock_tile.setContentView_(None)
+                AppKit.NSApp.setApplicationIconImage_(image)
+            else:
+                # 원래 아이콘으로 복원
+                AppKit.NSApp.setApplicationIconImage_(None)
+
+            dock_tile.display()
+        except Exception as e:
+            logging.debug(f"Dock progress error: {e}")
+
+    _last_dock_pct     = [-1.0]   # 이전 진행률 캐시
+    _last_dock_visible = [None]   # 이전 표시 여부 캐시
+
     def update_loop():
         while True:
-            time.sleep(1)
+            time.sleep(0.5)
             running = sum(1 for j in engine.jobs if j.status == Status.RUNNING)
             speed   = sum(j.speed for j in engine.jobs if j.status == Status.RUNNING)
             try:
                 status_bar.update_title(running, speed)
+            except:
+                pass
+
+            # Dock 프로그레스 바 — 변화가 있을 때만 업데이트
+            try:
+                running_jobs = [j for j in engine.jobs if j.status == Status.RUNNING]
+                if running_jobs:
+                    total_dl = sum(j.downloaded for j in running_jobs if j.total > 0)
+                    total_sz = sum(j.total      for j in running_jobs if j.total > 0)
+                    pct = round((total_dl / total_sz) if total_sz > 0 else 0.0, 2)
+                    visible = True
+                else:
+                    pct = 0.0
+                    visible = False
+
+                # 1% 이상 변화 또는 표시 여부 변경 시에만 갱신
+                if (visible != _last_dock_visible[0] or
+                        abs(pct - _last_dock_pct[0]) >= 0.01):
+                    _last_dock_pct[0]     = pct
+                    _last_dock_visible[0] = visible
+                    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                        lambda p=pct, v=visible: update_dock_progress(p, v)
+                    )
             except:
                 pass
 

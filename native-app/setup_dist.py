@@ -1,13 +1,6 @@
 """
-setup.py — Build SwiftGet.app with py2app
-
-사전 준비:
-  pip install py2app wxPython
-
-빌드:
-  python setup.py py2app
-
-결과물: dist/SwiftGet.app
+setup_dist.py — 배포용 빌드 (완전 독립 번들)
+  python setup_dist.py py2app
 """
 from setuptools import setup
 
@@ -18,9 +11,8 @@ OPTIONS = {
     "argv_emulation":  False,
     "strip":           False,
     "no_strip":        True,
-    "semi_standalone": True,   # Python 프레임워크 복사 안 함 → install_name_tool 오류 방지
+    "semi_standalone": False,  # Python 프레임워크 포함 (완전 독립)
 
-    # ── 아이콘 ──
     "iconfile": "icons/SwiftGet.icns",
 
     "plist": {
