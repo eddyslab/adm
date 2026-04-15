@@ -23,7 +23,7 @@ logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG,
 
 SOCKET_PATH = os.path.expanduser("~/Library/Application Support/SwiftGet/swiftget.sock")
 APP_BUNDLE   = "/Applications/SwiftGet.app"
-GUI_SCRIPT   = os.path.join(APP_BUNDLE, "Contents/MacOS/swiftget")
+GUI_SCRIPT   = os.path.join(APP_BUNDLE, "Contents/MacOS/SwiftGet")
 
 # ── Native Messaging I/O ──────────────────────────────────────────────────────
 
@@ -33,7 +33,11 @@ def read_message():
     if len(raw_len) < 4:
         return None
     msg_len = struct.unpack("<I", raw_len)[0]
+    if msg_len == 0:
+        return None
     data = sys.stdin.buffer.read(msg_len)
+    if not data:
+        return None
     return json.loads(data.decode("utf-8"))
 
 def send_message(msg):
@@ -48,12 +52,11 @@ def send_message(msg):
 def ensure_app_running():
     """Launch the GUI app if not already running."""
     if os.path.exists(SOCKET_PATH):
-        return  # Already running
+        return
     if os.path.exists(GUI_SCRIPT):
         logging.info("Launching SwiftGet GUI app")
         subprocess.Popen([GUI_SCRIPT], close_fds=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Wait for socket to appear (up to 5s)
         for _ in range(50):
             if os.path.exists(SOCKET_PATH):
                 break
@@ -95,12 +98,15 @@ def main():
             elif action == "focus":
                 send_to_gui({"action": "focus"})
 
-            elif action == "pong":
-                pass  # Heartbeat response
+            elif action == "ping":
+                send_message({"type": "pong"})
 
             else:
                 logging.warning(f"Unknown action: {action}")
 
+        except json.JSONDecodeError as e:
+            logging.warning(f"JSON parse error (skipping): {e}")
+            continue
         except Exception as e:
             logging.exception(f"Host error: {e}")
             break

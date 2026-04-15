@@ -1,0 +1,2 @@
+#!/bin/bash
+exec "/usr/bin/python3" "/Users/alan/Documents/Projects/1086-download-manager/src/git/adm/native-app/swiftget-host.py" "$@"

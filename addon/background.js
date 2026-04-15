@@ -59,12 +59,10 @@ function sendToNative(message) {
 async function resolveFilename(url) {
   let filename = "";
 
-  // 1. pathname 마지막 세그먼트
   try {
     const u = new URL(url);
     filename = decodeURIComponent(u.pathname.split("/").pop() || "");
 
-    // 2. 확장자 없으면 쿼리 파라미터에서 힌트 추출 (fm=jpg, format=png 등)
     if (filename && !filename.includes(".")) {
       const fmt = u.searchParams.get("fm")
                || u.searchParams.get("format")
@@ -74,34 +72,21 @@ async function resolveFilename(url) {
     }
   } catch (_) {}
 
-  // 3. 여전히 확장자 없으면 HEAD 요청으로 헤더 확인
   if (filename && !filename.includes(".")) {
     try {
       const res = await fetch(url, { method: "HEAD", credentials: "include" });
-
-      // Content-Disposition: attachment; filename="foo.jpg"
       const cd = res.headers.get("content-disposition") || "";
       const cdMatch = cd.match(/filename[*]?=(?:UTF-8'')?["']?([^"';\r\n]+)/i);
       if (cdMatch) {
         filename = decodeURIComponent(cdMatch[1].trim());
       } else {
-        // Content-Type → 확장자 매핑
         const ct = (res.headers.get("content-type") || "").split(";")[0].trim();
         const EXT_MAP = {
-          "image/jpeg":        "jpg",
-          "image/png":         "png",
-          "image/gif":         "gif",
-          "image/webp":        "webp",
-          "image/svg+xml":     "svg",
-          "image/avif":        "avif",
-          "video/mp4":         "mp4",
-          "video/webm":        "webm",
-          "video/quicktime":   "mov",
-          "audio/mpeg":        "mp3",
-          "audio/ogg":         "ogg",
-          "audio/flac":        "flac",
-          "application/zip":   "zip",
-          "application/pdf":   "pdf",
+          "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
+          "image/webp": "webp", "image/svg+xml": "svg", "image/avif": "avif",
+          "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+          "audio/mpeg": "mp3", "audio/ogg": "ogg", "audio/flac": "flac",
+          "application/zip": "zip", "application/pdf": "pdf",
         };
         const ext = EXT_MAP[ct];
         if (ext) filename = `${filename}.${ext}`;
@@ -165,8 +150,8 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
 
 function handleNativeMessage(msg) {
   switch (msg.type) {
-    case "status":
-      break;
+    case "status": break;
+    case "pong": break;
     case "error":
       browser.notifications.create({
         type: "basic",
@@ -174,9 +159,6 @@ function handleNativeMessage(msg) {
         title: "SwiftGet 오류",
         message: msg.message || "알 수 없는 오류"
       });
-      break;
-    case "ping":
-      sendToNative({ action: "pong" });
       break;
   }
 }

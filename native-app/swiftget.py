@@ -47,8 +47,9 @@ logging.basicConfig(filename=os.path.join(LOG_DIR, "swiftget.log"),
 # ── Persistent settings ──────────────────────────────────────────────────────
 
 _DEFAULTS = {
-    "save_dir": os.path.expanduser("~/Downloads"),
-    "segments": 8,
+    "save_dir":           os.path.expanduser("~/Downloads"),
+    "segments":           8,
+    "notify_on_complete": True,
 }
 
 def load_config() -> dict:
@@ -534,37 +535,63 @@ class JobCard(wx.Panel):
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, cfg: dict):
         super().__init__(parent, title="SwiftGet 설정",
-                         style=wx.DEFAULT_DIALOG_STYLE)
+                         style=wx.DEFAULT_DIALOG_STYLE,
+                         size=(480, 300))
         self.cfg = dict(cfg)
 
         root = wx.BoxSizer(wx.VERTICAL)
-        grid = wx.FlexGridSizer(cols=3, vgap=12, hgap=10)
-        grid.AddGrowableCol(1, 1)
 
-        # ── 다운로드 경로 ──
-        grid.Add(wx.StaticText(self, label="다운로드 경로:"),
-                 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_dir = wx.TextCtrl(self, value=cfg["save_dir"], size=(320, -1))
-        grid.Add(self.txt_dir, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
-        btn_browse = wx.Button(self, label="찾아보기…", size=(90, -1))
-        grid.Add(btn_browse, 0, wx.ALIGN_CENTER_VERTICAL)
+        # ── 탭 ──
+        notebook = wx.Notebook(self)
 
-        # ── 세그먼트 수 ──
-        grid.Add(wx.StaticText(self, label="기본 세그먼트 수:"),
-                 0, wx.ALIGN_CENTER_VERTICAL)
-        self.spin_seg = wx.SpinCtrl(self, value=str(cfg["segments"]),
+        # ── 탭 1: 다운로드 ──
+        tab_dl = wx.Panel(notebook)
+        grid_dl = wx.FlexGridSizer(cols=3, vgap=14, hgap=10)
+        grid_dl.AddGrowableCol(1, 1)
+
+        grid_dl.Add(wx.StaticText(tab_dl, label="다운로드 경로:"),
+                    0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_dir = wx.TextCtrl(tab_dl, value=cfg["save_dir"])
+        grid_dl.Add(self.txt_dir, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        btn_browse = wx.Button(tab_dl, label="찾아보기…", size=(90, -1))
+        grid_dl.Add(btn_browse, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        grid_dl.Add(wx.StaticText(tab_dl, label="기본 세그먼트 수:"),
+                    0, wx.ALIGN_CENTER_VERTICAL)
+        self.spin_seg = wx.SpinCtrl(tab_dl, value=str(cfg["segments"]),
                                     min=1, max=32, size=(64, -1))
-        grid.Add(self.spin_seg, 0, wx.ALIGN_CENTER_VERTICAL)
-        grid.Add(wx.StaticText(self, label="(1 = 분할 안 함)"),
-                 0, wx.ALIGN_CENTER_VERTICAL)
+        grid_dl.Add(self.spin_seg, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid_dl.Add(wx.StaticText(tab_dl, label="(1 = 분할 안 함)"),
+                    0, wx.ALIGN_CENTER_VERTICAL)
 
-        root.Add(grid, 0, wx.EXPAND | wx.ALL, 20)
+        tab_dl_sizer = wx.BoxSizer(wx.VERTICAL)
+        tab_dl_sizer.Add(grid_dl, 0, wx.EXPAND | wx.ALL, 16)
+        tab_dl.SetSizer(tab_dl_sizer)
+        notebook.AddPage(tab_dl, "다운로드")
+
+        # ── 탭 2: 알림 (todo #1 대비 미리 구성) ──
+        tab_notify = wx.Panel(notebook)
+        grid_notify = wx.FlexGridSizer(cols=2, vgap=14, hgap=10)
+        grid_notify.AddGrowableCol(1, 1)
+
+        grid_notify.Add(wx.StaticText(tab_notify, label="다운로드 완료 알림:"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        self.chk_notify = wx.CheckBox(tab_notify, label="완료 시 알림 표시")
+        self.chk_notify.SetValue(cfg.get("notify_on_complete", True))
+        grid_notify.Add(self.chk_notify, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        tab_notify_sizer = wx.BoxSizer(wx.VERTICAL)
+        tab_notify_sizer.Add(grid_notify, 0, wx.EXPAND | wx.ALL, 16)
+        tab_notify.SetSizer(tab_notify_sizer)
+        notebook.AddPage(tab_notify, "알림")
+
+        root.Add(notebook, 1, wx.EXPAND | wx.ALL, 10)
 
         # ── OK / Cancel ──
         btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
-        root.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
+        root.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
-        self.SetSizerAndFit(root)
+        self.SetSizer(root)
         self.Centre()
 
         btn_browse.Bind(wx.EVT_BUTTON, self._on_browse)
@@ -579,8 +606,9 @@ class SettingsDialog(wx.Dialog):
         dlg.Destroy()
 
     def _on_ok(self, event):
-        self.cfg["save_dir"] = self.txt_dir.GetValue().strip()
-        self.cfg["segments"] = self.spin_seg.GetValue()
+        self.cfg["save_dir"]          = self.txt_dir.GetValue().strip()
+        self.cfg["segments"]          = self.spin_seg.GetValue()
+        self.cfg["notify_on_complete"]= self.chk_notify.GetValue()
         event.Skip()
 
     def get_config(self) -> dict:
@@ -590,10 +618,11 @@ class SettingsDialog(wx.Dialog):
 # ── Main window ───────────────────────────────────────────────────────────────
 
 class SwiftGetFrame(wx.Frame):
-    def __init__(self, engine: DownloadEngine):
+    def __init__(self, engine: DownloadEngine, dev_mode: bool = False):
         super().__init__(None, title="SwiftGet", size=(780, 560),
                          style=wx.DEFAULT_FRAME_STYLE)
         self.engine   = engine
+        self.dev_mode = dev_mode
         self._cards: dict[str, JobCard] = {}   # uid → JobCard
         self._cfg     = load_config()
 
@@ -613,61 +642,78 @@ class SwiftGetFrame(wx.Frame):
         self.Bind(wx.EVT_TIMER, self._on_refresh, self._timer)
         self._timer.Start(500)
 
+        # 윈도우 닫기 이벤트
+        self.Bind(wx.EVT_CLOSE, self._on_close)
+
+    def _on_close(self, event):
+        if self.dev_mode:
+            # 개발 모드: 완전 종료
+            self._timer.Stop()
+            wx.GetApp().ExitMainLoop()
+        else:
+            # 일반 모드: 창만 숨김 (메뉴바 상주)
+            self.Hide()
+
     # ── UI Construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
         panel = wx.Panel(self)
         root  = wx.BoxSizer(wx.VERTICAL)
 
-        # ── Toolbar ──
-        tb = wx.BoxSizer(wx.HORIZONTAL)
+        # ── 로고 헤더 (탭 위 공통 영역) ──
+        hdr = wx.BoxSizer(wx.HORIZONTAL)
         lbl = wx.StaticText(panel, label="Swift")
         font = lbl.GetFont()
         font.SetPointSize(font.GetPointSize() + 8)
         font.SetWeight(wx.FONTWEIGHT_BOLD)
         lbl.SetFont(font)
-
         lbl2 = wx.StaticText(panel, label="Get")
         lbl2.SetFont(font)
         lbl2.SetForegroundColour(wx.Colour(52, 199, 89))
+        hdr.Add(lbl,  0, wx.ALIGN_CENTER_VERTICAL)
+        hdr.Add(lbl2, 0, wx.ALIGN_CENTER_VERTICAL)
+        root.Add(hdr, 0, wx.LEFT | wx.TOP, 16)
+        root.AddSpacer(10)
 
-        btn_clear    = wx.Button(panel, label="완료 항목 지우기")
-        btn_folder   = wx.Button(panel, label="폴더 열기")
-        btn_add      = wx.Button(panel, label="＋ URL 추가")
-        btn_settings = wx.Button(panel, label="⚙ 설정")
+        # ── 메인 탭 ──
+        self.notebook = wx.Notebook(panel)
 
-        tb.Add(lbl,  0, wx.ALIGN_CENTER_VERTICAL)
-        tb.Add(lbl2, 0, wx.ALIGN_CENTER_VERTICAL)
+        # ════════════════════════════════
+        # 탭 1: 일반 (다운로드 목록)
+        # ════════════════════════════════
+        tab_main = wx.Panel(self.notebook)
+        sizer_main = wx.BoxSizer(wx.VERTICAL)
+
+        # 툴바
+        tb = wx.BoxSizer(wx.HORIZONTAL)
+        btn_clear  = wx.Button(tab_main, label="완료 항목 지우기")
+        btn_folder = wx.Button(tab_main, label="폴더 열기")
+        btn_add    = wx.Button(tab_main, label="＋ URL 추가")
         tb.AddStretchSpacer()
-        tb.Add(btn_clear,    0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
-        tb.Add(btn_folder,   0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
-        tb.Add(btn_add,      0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
-        tb.Add(btn_settings, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
-        root.Add(tb, 0, wx.EXPAND | wx.ALL, 16)
+        tb.Add(btn_clear,  0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        tb.Add(btn_folder, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        tb.Add(btn_add,    0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+        sizer_main.Add(tb, 0, wx.EXPAND | wx.ALL, 10)
 
-        # ── URL quick-add bar ──
+        # URL 입력
         url_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.url_field = wx.TextCtrl(panel, value="",
-                                     style=wx.TE_PROCESS_ENTER,
-                                     size=(-1, 30))
+        self.url_field = wx.TextCtrl(tab_main, style=wx.TE_PROCESS_ENTER, size=(-1, 30))
         self.url_field.SetHint("URL을 여기에 붙여넣기...")
-        btn_dl = wx.Button(panel, label="다운로드", size=(-1, 30))
-
+        btn_dl = wx.Button(tab_main, label="다운로드", size=(-1, 30))
         url_row.Add(self.url_field, 1, wx.ALIGN_CENTER_VERTICAL)
         url_row.Add(btn_dl, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
-        root.Add(url_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
+        sizer_main.Add(url_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
-        # ── Stats label ──
-        self.lbl_stats = wx.StaticText(panel, label="대기 중...")
-        root.Add(self.lbl_stats, 0, wx.LEFT | wx.BOTTOM, 16)
+        # 통계
+        self.lbl_stats = wx.StaticText(tab_main, label="대기 중...")
+        sizer_main.Add(self.lbl_stats, 0, wx.LEFT | wx.BOTTOM, 10)
 
-        # ── Scrolled job list ──
-        self.scroll = scrolled.ScrolledPanel(panel, style=wx.BORDER_NONE)
+        # 다운로드 목록
+        self.scroll = scrolled.ScrolledPanel(tab_main, style=wx.BORDER_NONE)
         self.scroll.SetupScrolling(scroll_x=False)
         self.job_sizer = wx.BoxSizer(wx.VERTICAL)
         self.scroll.SetSizer(self.job_sizer)
 
-        # Empty state label
         self.lbl_empty = wx.StaticText(self.scroll, label="다운로드 항목이 없습니다")
         font_e = self.lbl_empty.GetFont()
         font_e.SetPointSize(font_e.GetPointSize() - 1)
@@ -675,17 +721,68 @@ class SwiftGetFrame(wx.Frame):
         self.lbl_empty.SetForegroundColour(wx.Colour(150, 150, 150))
         self.job_sizer.Add(self.lbl_empty, 0, wx.ALL, 20)
 
-        root.Add(self.scroll, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
+        sizer_main.Add(self.scroll, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        tab_main.SetSizer(sizer_main)
+        self.notebook.AddPage(tab_main, "일반")
 
+        # ════════════════════════════════
+        # 탭 2: 다운로드 설정
+        # ════════════════════════════════
+        tab_dl = wx.Panel(self.notebook)
+        grid_dl = wx.FlexGridSizer(cols=3, vgap=14, hgap=10)
+        grid_dl.AddGrowableCol(1, 1)
+
+        grid_dl.Add(wx.StaticText(tab_dl, label="다운로드 경로:"),
+                    0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_dir = wx.TextCtrl(tab_dl, value=self._cfg["save_dir"])
+        grid_dl.Add(self.txt_dir, 1, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        btn_browse = wx.Button(tab_dl, label="찾아보기…", size=(90, -1))
+        grid_dl.Add(btn_browse, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        grid_dl.Add(wx.StaticText(tab_dl, label="기본 세그먼트 수:"),
+                    0, wx.ALIGN_CENTER_VERTICAL)
+        self.spin_seg = wx.SpinCtrl(tab_dl, value=str(self._cfg["segments"]),
+                                    min=1, max=32, size=(64, -1))
+        grid_dl.Add(self.spin_seg, 0, wx.ALIGN_CENTER_VERTICAL)
+        grid_dl.Add(wx.StaticText(tab_dl, label="(1 = 분할 안 함)"),
+                    0, wx.ALIGN_CENTER_VERTICAL)
+
+        sizer_dl = wx.BoxSizer(wx.VERTICAL)
+        sizer_dl.Add(grid_dl, 0, wx.EXPAND | wx.ALL, 16)
+        tab_dl.SetSizer(sizer_dl)
+        self.notebook.AddPage(tab_dl, "다운로드")
+
+        # ════════════════════════════════
+        # 탭 3: 알림 설정
+        # ════════════════════════════════
+        tab_notify = wx.Panel(self.notebook)
+        grid_notify = wx.FlexGridSizer(cols=2, vgap=14, hgap=10)
+        grid_notify.AddGrowableCol(1, 1)
+
+        grid_notify.Add(wx.StaticText(tab_notify, label="다운로드 완료 알림:"),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        self.chk_notify = wx.CheckBox(tab_notify, label="완료 시 알림 표시")
+        self.chk_notify.SetValue(self._cfg.get("notify_on_complete", True))
+        grid_notify.Add(self.chk_notify, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        sizer_notify = wx.BoxSizer(wx.VERTICAL)
+        sizer_notify.Add(grid_notify, 0, wx.EXPAND | wx.ALL, 16)
+        tab_notify.SetSizer(sizer_notify)
+        self.notebook.AddPage(tab_notify, "알림")
+
+        root.Add(self.notebook, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
         panel.SetSizer(root)
 
         # Events
-        btn_add.Bind(     wx.EVT_BUTTON,    self._on_add_url)
-        btn_clear.Bind(   wx.EVT_BUTTON,    self._on_clear_done)
-        btn_folder.Bind(  wx.EVT_BUTTON,    lambda e: subprocess.Popen(["open", self.engine.save_dir]))
-        btn_settings.Bind(wx.EVT_BUTTON,    self._on_settings)
-        btn_dl.Bind(      wx.EVT_BUTTON,    self._on_quick_add)
+        btn_add.Bind(   wx.EVT_BUTTON,     self._on_add_url)
+        btn_clear.Bind( wx.EVT_BUTTON,     self._on_clear_done)
+        btn_folder.Bind(wx.EVT_BUTTON,     lambda e: subprocess.Popen(["open", self.engine.save_dir]))
+        btn_dl.Bind(    wx.EVT_BUTTON,     self._on_quick_add)
+        btn_browse.Bind(wx.EVT_BUTTON,     self._on_browse)
         self.url_field.Bind(wx.EVT_TEXT_ENTER, self._on_quick_add)
+        self.spin_seg.Bind(wx.EVT_SPINCTRL,    self._on_seg_change)
+        self.chk_notify.Bind(wx.EVT_CHECKBOX,  self._on_notify_change)
+        self.notebook.SetSelection(0)
 
     # ── Refresh ───────────────────────────────────────────────────────────────
 
@@ -747,14 +844,25 @@ class SwiftGetFrame(wx.Frame):
                 self.engine.add(url)
         dlg.Destroy()
 
-    def _on_settings(self, event):
-        dlg = SettingsDialog(self, self._cfg)
+    def _on_browse(self, event):
+        dlg = wx.DirDialog(self, "다운로드 경로 선택",
+                           defaultPath=self.txt_dir.GetValue(),
+                           style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST | wx.DD_NEW_DIR_BUTTON)
         if dlg.ShowModal() == wx.ID_OK:
-            self._cfg = dlg.get_config()
+            self.txt_dir.SetValue(dlg.GetPath())
+            self._cfg["save_dir"] = dlg.GetPath()
+            self.engine.save_dir  = dlg.GetPath()
             save_config(self._cfg)
-            self.engine.segments = self._cfg["segments"]
-            self.engine.save_dir = self._cfg["save_dir"]
         dlg.Destroy()
+
+    def _on_seg_change(self, event):
+        self._cfg["segments"]  = self.spin_seg.GetValue()
+        self.engine.segments   = self._cfg["segments"]
+        save_config(self._cfg)
+
+    def _on_notify_change(self, event):
+        self._cfg["notify_on_complete"] = self.chk_notify.GetValue()
+        save_config(self._cfg)
 
     def _on_clear_done(self, event):
         for j in list(self.engine.jobs):
@@ -877,8 +985,15 @@ def register_native_messaging():
     manifest_path = os.path.join(manifest_dir, "app.swiftget.downloader.json")
 
     # 앱 번들 내 실제 host 스크립트 경로
-    exe_dir   = os.path.dirname(os.path.abspath(sys.argv[0]))
-    host_path = os.path.join(exe_dir, "swiftget-host")
+    # sys.argv[0] 이 Resources 폴더를 가리킬 수 있으므로 MacOS 폴더를 명시적으로 탐색
+    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    # Resources → Contents → MacOS 순으로 탐색
+    macos_dir = os.path.join(exe_dir, "..", "..", "MacOS")
+    macos_dir = os.path.normpath(macos_dir)
+    if os.path.isdir(macos_dir):
+        host_path = os.path.join(macos_dir, "swiftget-host")
+    else:
+        host_path = os.path.join(exe_dir, "swiftget-host")
 
     manifest = {
         "name":               "app.swiftget.downloader",
@@ -909,11 +1024,14 @@ def register_native_messaging():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    register_native_messaging()
+    dev_mode = "--dev" in sys.argv
+
+    if not dev_mode:
+        register_native_messaging()
 
     app    = wx.App(False)
     engine = DownloadEngine(on_update=lambda: None)
-    frame  = SwiftGetFrame(engine)
+    frame  = SwiftGetFrame(engine, dev_mode=dev_mode)
 
     start_socket_server(engine, frame)
 
