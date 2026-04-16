@@ -63,11 +63,25 @@ logging.basicConfig(filename=os.path.join(LOG_DIR, "swiftget.log"),
 
 # ── Persistent settings ──────────────────────────────────────────────────────
 
+def _detect_system_lang() -> str:
+    """macOS 시스템 언어를 감지하여 지원 언어 코드 반환. 없으면 'en'."""
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleLanguages"],
+            capture_output=True, text=True)
+        for line in result.stdout.splitlines():
+            code = line.strip().strip('",()').split("-")[0]
+            if code in ("ko", "en", "ja", "zh", "fr", "es"):
+                return code
+    except Exception:
+        pass
+    return "en"
+
 _DEFAULTS = {
     "save_dir":           os.path.expanduser("~/Downloads"),
     "segments":           8,
     "notify_on_complete": True,
-    "language":           "ko",
+    "language":           _detect_system_lang(),
 }
 
 def load_config() -> dict:
@@ -844,7 +858,7 @@ class SwiftGetFrame(wx.Frame):
         if result == wx.ID_YES:
             python = sys.executable
             os.execv(python, [python] + sys.argv)
-            
+
     # ── Refresh ───────────────────────────────────────────────────────────────
 
     def _post_refresh(self):
