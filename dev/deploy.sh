@@ -21,6 +21,18 @@ echo ""
 echo "  SwiftGet Dev Deploy"
 echo ""
 
+# ── Fresh install 옵션 ────────────────────────────────────────────────────────
+# 첫 설치 상태 테스트 시 config.json 제거
+# ex) bash dev/deploy.sh --fresh
+if [[ "${1:-}" == "--fresh" ]]; then
+    info "config.json 제거 (첫 설치 상태로 초기화)..."
+    rm -f ~/Library/Application\ Support/SwiftGet/config.json
+    ok "config.json 제거 완료"
+fi
+
+# ── Step 1: 빌드 ─────────────────────────────────────────────────────────────
+
+
 # ── Step 1: 빌드 ─────────────────────────────────────────────────────────────
 info "빌드 시작..."
 bash "$SCRIPT_DIR/installer/install.sh"
