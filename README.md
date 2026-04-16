@@ -43,8 +43,10 @@ adm/
 │
 ├── native-app/                     # macOS 네이티브 앱
 │   ├── swiftget.py                 # GUI 다운로드 매니저 (wxPython)
+│   ├── i18n.py                     # 다국어 지원 (한국어, 영어, 일본어, 중국어, 불어, 스페인어)
 │   ├── swiftget-host.py            # Native Messaging 브리지
-│   ├── setup.py                    # py2app 빌드 설정
+│   ├── setup.py                    # py2app 빌드 설정 (개발용)
+│   ├── setup_dist.py               # py2app 빌드 설정 (배포용)
 │   ├── icons/
 │   │   └── SwiftGet.icns           # 앱 아이콘
 │   └── app.swiftget.downloader.json  # 개발용 매니페스트
@@ -66,6 +68,16 @@ adm/
 
 > 보안 경고가 뜨면: 시스템 설정 → 개인정보 보호 및 보안 → 허용
 
+### 업그레이드 시 주의사항
+
+기존 버전이 설치된 상태에서 새 버전으로 업그레이드할 경우 아래 순서를 따라 주세요.
+순서를 지키지 않으면 앱 아이콘이 깨져 보이는 증상이 발생할 수 있습니다.
+
+1. 메뉴바의 SwiftGet 아이콘 → **종료** 클릭
+2. Finder에서 `/Applications/SwiftGet.app` 삭제 (휴지통으로 이동)
+3. 새 `SwiftGet.dmg`를 열어 `SwiftGet.app`을 응용 프로그램 폴더로 드래그
+4. `SwiftGet.app` 실행
+
 ---
 
 ## 빌드 방법 (개발자)
@@ -78,7 +90,7 @@ adm/
 ### 사전 준비
 
 ```bash
-pip3 install wxPython py2app
+pip3 install wxPython py2app pyobjc-framework-Cocoa
 ```
 
 `native-app/icons/SwiftGet.icns` 파일이 있어야 합니다.
@@ -93,7 +105,7 @@ bash installer/install.sh
 1. `SwiftGet.app` 빌드 (`py2app`)
 2. 아이콘 번들에 적용
 3. Native Messaging 호스트 스크립트 포함
-4. Firefox 애드온 `.xpi` 패키징
+4. Firefox 애드온 `.xpi` 패키징 (서명된 XPI 사용)
 5. `dist/SwiftGet.dmg` 생성
 
 ### 개발 모드 직접 실행
@@ -117,6 +129,9 @@ python3 native-app/swiftget.py
 | 인증 지원 | Cookie, Referer 헤더 자동 전달 |
 | 설정 저장 | 다운로드 경로, 세그먼트 수 설정 (config.json 영속화) |
 | 메뉴바 상주 | 메뉴바에서 실시간 다운로드 속도 표시 |
+| 다운로드 완료 알림 | macOS 알림 센터를 통한 완료 알림 |
+| URL 목록 임포트 | 텍스트 파일에서 URL 일괄 추가 (중복 제거 지원) |
+| 다국어 지원 | 한국어, 영어, 일본어, 중국어, 불어, 스페인어 |
 
 ---
 

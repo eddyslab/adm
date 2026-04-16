@@ -54,7 +54,7 @@ OPTIONS = {
         "NSHighResolutionCapable":    True,
     },
 
-    "packages": ["wx"],
+    "packages": ["wx", "i18n"],
     "includes": ["uuid", "AppKit", "objc"],
     "excludes": ["tkinter", "rumps", "matplotlib", "numpy", "scipy"],
 }
