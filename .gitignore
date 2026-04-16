@@ -37,3 +37,5 @@ pip-wheel-metadata/
 
 # ── 개발 임시 파일 ───────────────────────────────────────────────────────────
 iconset*/
+
+addon/web-ext-artifacts/

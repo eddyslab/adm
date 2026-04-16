@@ -180,11 +180,12 @@ cp "$NATIVE_APP_DIR/swiftget-host.py" \
    "$APP_PATH/Contents/Resources/swiftget-host.py"
 ok "Native host ready"
 
-# Step 7: package addon
-info "Packaging Firefox addon..."
+# Step 7: copy signed addon
+info "Copying signed Firefox addon..."
 XPI_PATH="$NATIVE_APP_DIR/dist/SwiftGet.xpi"
-cd "$ADDON_DIR"
-zip -r "$XPI_PATH" . -x "*.DS_Store" -x "__MACOSX/*" > /dev/null
+SIGNED_XPI="$ADDON_DIR/SwiftGet-signed.xpi"
+[ -f "$SIGNED_XPI" ] || err "서명된 XPI 없음: $SIGNED_XPI"
+cp "$SIGNED_XPI" "$XPI_PATH"
 ok "SwiftGet.xpi ready"
 
 # Step 8: build DMG
