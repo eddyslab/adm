@@ -39,3 +39,4 @@ pip-wheel-metadata/
 iconset*/
 
 addon/web-ext-artifacts/
+addon/.web-extension-id
