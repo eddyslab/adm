@@ -18,6 +18,7 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
+import re
 import http.client
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -180,36 +181,97 @@ class DownloadEngine:
             filename = urllib.parse.unquote(filename)
 
             # 확장자가 없으면 HEAD 요청으로 Content-Type 확인
+            # if not os.path.splitext(filename)[1]:
+            #     try:
+            #         headers = {"User-Agent": "SwiftGet/1.0"}
+            #         if referrer: headers["Referer"] = referrer
+            #         if cookies:  headers["Cookie"]  = cookies
+            #         req = urllib.request.Request(url, headers=headers, method="HEAD")
+            #         with urllib.request.urlopen(req, timeout=10) as resp:
+            #             ct = resp.headers.get("Content-Type", "")
+            #             ct = ct.split(";")[0].strip().lower()
+            #             ext_map = {
+            #                 "image/jpeg":       ".jpg",
+            #                 "image/png":        ".png",
+            #                 "image/gif":        ".gif",
+            #                 "image/webp":       ".webp",
+            #                 "image/svg+xml":    ".svg",
+            #                 "video/mp4":        ".mp4",
+            #                 "video/webm":       ".webm",
+            #                 "audio/mpeg":       ".mp3",
+            #                 "audio/ogg":        ".ogg",
+            #                 "application/pdf":  ".pdf",
+            #                 "application/zip":  ".zip",
+            #                 "text/plain":       ".txt",
+            #                 "text/html":        ".html",
+            #             }
+            #             ext = ext_map.get(ct, "")
+            #             if ext:
+            #                 filename += ext
+            #     except Exception as e:
+            #         logging.debug(f"HEAD request failed for {url}: {e}")
+
+            # 확장자가 없으면 HEAD → GET fallback으로 Content-Type 확인
             if not os.path.splitext(filename)[1]:
+                ext_map = {
+                    "image/jpeg":       ".jpg",
+                    "image/png":        ".png",
+                    "image/gif":        ".gif",
+                    "image/webp":       ".webp",
+                    "image/svg+xml":    ".svg",
+                    "image/avif":       ".avif",
+                    "video/mp4":        ".mp4",
+                    "video/webm":       ".webm",
+                    "video/quicktime":  ".mov",
+                    "audio/mpeg":       ".mp3",
+                    "audio/ogg":        ".ogg",
+                    "audio/flac":       ".flac",
+                    "application/pdf":  ".pdf",
+                    "application/zip":  ".zip",
+                    "text/plain":       ".txt",
+                    "text/html":        ".html",
+                }
+                headers = {"User-Agent": "SwiftGet/1.0"}
+                if referrer: headers["Referer"] = referrer
+                if cookies:  headers["Cookie"]  = cookies
+
+                def _get_ext_from_resp(resp):
+                    # Content-Disposition 우선
+                    cd = resp.headers.get("Content-Disposition", "")
+                    cd_match = re.search(r'filename[*]?=(?:UTF-8\'\')?["\']?([^"\';\r\n]+)', cd, re.I)
+                    if cd_match:
+                        cd_name = urllib.parse.unquote(cd_match.group(1).strip())
+                        cd_ext  = os.path.splitext(cd_name)[1]
+                        if cd_ext:
+                            return cd_name, cd_ext
+                    ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                    return None, ext_map.get(ct, "")
+
+                ext = ""
                 try:
-                    headers = {"User-Agent": "SwiftGet/1.0"}
-                    if referrer: headers["Referer"] = referrer
-                    if cookies:  headers["Cookie"]  = cookies
                     req = urllib.request.Request(url, headers=headers, method="HEAD")
                     with urllib.request.urlopen(req, timeout=10) as resp:
-                        ct = resp.headers.get("Content-Type", "")
-                        ct = ct.split(";")[0].strip().lower()
-                        ext_map = {
-                            "image/jpeg":       ".jpg",
-                            "image/png":        ".png",
-                            "image/gif":        ".gif",
-                            "image/webp":       ".webp",
-                            "image/svg+xml":    ".svg",
-                            "video/mp4":        ".mp4",
-                            "video/webm":       ".webm",
-                            "audio/mpeg":       ".mp3",
-                            "audio/ogg":        ".ogg",
-                            "application/pdf":  ".pdf",
-                            "application/zip":  ".zip",
-                            "text/plain":       ".txt",
-                            "text/html":        ".html",
-                        }
-                        ext = ext_map.get(ct, "")
-                        if ext:
-                            filename += ext
+                        cd_name, ext = _get_ext_from_resp(resp)
+                        if cd_name:
+                            filename = cd_name
+                            ext = ""
                 except Exception as e:
                     logging.debug(f"HEAD request failed for {url}: {e}")
+                    # GET fallback — Range로 첫 1KB만 요청
+                    try:
+                        get_headers = {**headers, "Range": "bytes=0-1023"}
+                        req = urllib.request.Request(url, headers=get_headers, method="GET")
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            cd_name, ext = _get_ext_from_resp(resp)
+                            if cd_name:
+                                filename = cd_name
+                                ext = ""
+                    except Exception as e2:
+                        logging.debug(f"GET fallback failed for {url}: {e2}")
 
+                if ext:
+                    filename += ext
+                    
         save_dir  = getattr(self, "save_dir", SAVE_DIR)
         save_path = os.path.join(save_dir, filename)
         base, ext = os.path.splitext(save_path)

@@ -54,49 +54,6 @@ function sendToNative(message) {
   }
 }
 
-// ── 파일명 감지 ───────────────────────────────────────────────────────────────
-
-async function resolveFilename(url) {
-  let filename = "";
-
-  try {
-    const u = new URL(url);
-    filename = decodeURIComponent(u.pathname.split("/").pop() || "");
-
-    if (filename && !filename.includes(".")) {
-      const fmt = u.searchParams.get("fm")
-               || u.searchParams.get("format")
-               || u.searchParams.get("ext")
-               || u.searchParams.get("type");
-      if (fmt) filename = `${filename}.${fmt.toLowerCase()}`;
-    }
-  } catch (_) {}
-
-  if (filename && !filename.includes(".")) {
-    try {
-      const res = await fetch(url, { method: "HEAD", credentials: "include" });
-      const cd = res.headers.get("content-disposition") || "";
-      const cdMatch = cd.match(/filename[*]?=(?:UTF-8'')?["']?([^"';\r\n]+)/i);
-      if (cdMatch) {
-        filename = decodeURIComponent(cdMatch[1].trim());
-      } else {
-        const ct = (res.headers.get("content-type") || "").split(";")[0].trim();
-        const EXT_MAP = {
-          "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
-          "image/webp": "webp", "image/svg+xml": "svg", "image/avif": "avif",
-          "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
-          "audio/mpeg": "mp3", "audio/ogg": "ogg", "audio/flac": "flac",
-          "application/zip": "zip", "application/pdf": "pdf",
-        };
-        const ext = EXT_MAP[ct];
-        if (ext) filename = `${filename}.${ext}`;
-      }
-    } catch (_) {}
-  }
-
-  return filename;
-}
-
 // ── Context Menu ─────────────────────────────────────────────────────────────
 
 browser.contextMenus.create({
@@ -137,12 +94,13 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     cookies = cookieList.map(c => `${c.name}=${c.value}`).join("; ");
   } catch (_) {}
 
-  const filename = await resolveFilename(url);
+  // filename은 앱에서 처리
+  const displayName = url.split("/").pop().split("?")[0] || url;
 
   sendToNative({
     action: "download",
     url,
-    filename,
+    filename: "",
     referrer,
     cookies,
     mime: "",
@@ -154,7 +112,7 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     type: "basic",
     iconUrl: "icons/icon48.png",
     title: "SwiftGet",
-    message: `${filename || url} 다운로드가 전송되었습니다.`
+    message: `${displayName} 다운로드가 전송되었습니다.`
   });
 });
 
@@ -201,12 +159,10 @@ browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         referrer = tabs[0]?.url || "";
       } catch (_) {}
 
-      const filename = await resolveFilename(msg.url);
-
       sendToNative({
         action: "download",
         url: msg.url,
-        filename,
+        filename: "",
         referrer,
         cookies,
         mime: "",
