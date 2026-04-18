@@ -20,6 +20,8 @@ import urllib.parse
 import urllib.error
 import re
 import http.client
+import UserNotifications
+from Foundation import NSObject
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
@@ -82,6 +84,7 @@ _DEFAULTS = {
     "save_dir":           os.path.expanduser("~/Downloads"),
     "segments":           8,
     "notify_on_complete": True,
+    "reveal_on_complete": True,
     "language":           _detect_system_lang(),
 }
 
@@ -100,14 +103,95 @@ def save_config(cfg: dict):
     except Exception as e:
         logging.warning(f"Config save failed: {e}")
 
-def send_notification(title: str, message: str):
+
+# ── UNUserNotificationCenter Delegate ────────────────────────────────────────
+
+class NotificationDelegate(NSObject):
+    """알림 클릭 시 Finder에서 파일 열기."""
+
+    def userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
+        self, center, response, completionHandler
+    ):
+        try:
+            user_info = response.notification().request().content().userInfo()
+            save_path = user_info.get("save_path", "")
+            if save_path and os.path.exists(save_path):
+                subprocess.run(["open", "-R", save_path])
+        except Exception as e:
+            logging.warning(f"알림 클릭 핸들러 오류: {e}")
+        completionHandler()
+
+    def userNotificationCenter_willPresentNotification_withCompletionHandler_(
+        self, center, notification, completionHandler
+    ):
+        # 앱 실행 중에도 배너 알림 표시
+        completionHandler(
+            UserNotifications.UNNotificationPresentationOptionBanner |
+            UserNotifications.UNNotificationPresentationOptionSound
+        )
+
+
+# delegate 인스턴스 — GC 방지를 위해 모듈 레벨에 유지
+_notification_delegate = None
+
+def _is_signed() -> bool:
+    """앱이 코드 서명되어 있는지 확인."""
+    try:
+        result = subprocess.run(
+            ["codesign", "-v", "/Applications/SwiftGet.app"],
+            capture_output=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+_APP_SIGNED = _is_signed()
+
+def _setup_notification_delegate():
+    """앱 시작 시 한 번만 호출."""
+    if not _APP_SIGNED:
+        logging.info("미서명 앱 — 알림 delegate 건너뜀")
+        return
+    global _notification_delegate
+    try:
+        center = UserNotifications.UNUserNotificationCenter.currentNotificationCenter()
+        _notification_delegate = NotificationDelegate.alloc().init()
+        center.setDelegate_(_notification_delegate)
+        center.requestAuthorizationWithOptions_completionHandler_(
+            UserNotifications.UNAuthorizationOptionAlert |
+            UserNotifications.UNAuthorizationOptionSound,
+            lambda granted, error: logging.info(f"알림 권한: {granted}")
+        )
+        logging.info("알림 delegate 설정 완료")
+    except Exception as e:
+        logging.warning(f"알림 delegate 설정 실패: {e}")
+
+def send_notification(title: str, message: str, save_path: str = ""):
     """macOS 알림 센터에 알림 전송."""
     try:
-        script = f'display notification "{message}" with title "{title}"'
-        subprocess.run(["osascript", "-e", script], check=False)
+        if _APP_SIGNED:
+            # UNUserNotificationCenter — 클릭 시 Finder에서 파일 열기
+            center = UserNotifications.UNUserNotificationCenter.currentNotificationCenter()
+            content = UserNotifications.UNMutableNotificationContent.alloc().init()
+            content.setTitle_(title)
+            content.setBody_(message)
+            content.setSound_(UserNotifications.UNNotificationSound.defaultSound())
+            if save_path:
+                content.setUserInfo_({"save_path": save_path})
+            request = UserNotifications.UNNotificationRequest.requestWithIdentifier_content_trigger_(
+                f"swiftget-{os.path.basename(save_path or 'dl')}",
+                content, None
+            )
+            center.addNotificationRequest_withCompletionHandler_(request, None)
+        else:
+            # osascript fallback — 알림 + Finder 자동 오픈
+            script = f'display notification "{message}" with title "{title}"'
+            subprocess.run(["osascript", "-e", script], check=False)
+            if save_path and os.path.exists(save_path):
+                subprocess.run(["open", "-R", save_path], check=False)
     except Exception as e:
         logging.warning(f"알림 전송 실패: {e}")
-
+                 
 _cfg     = load_config()
 SAVE_DIR = _cfg["save_dir"]
 SEGMENTS = _cfg["segments"]
@@ -271,7 +355,7 @@ class DownloadEngine:
 
                 if ext:
                     filename += ext
-                    
+
         save_dir  = getattr(self, "save_dir", SAVE_DIR)
         save_path = os.path.join(save_dir, filename)
         base, ext = os.path.splitext(save_path)
@@ -308,7 +392,11 @@ class DownloadEngine:
                     if len(fname) > 40:
                         fname = fname[:37] + "..."
                     t = get_strings(cfg.get("language", "ko"))
-                    send_notification("SwiftGet", t.get("notif_done", "Done: {fname}").format(fname=fname))
+
+                    send_notification("SwiftGet",
+                        t.get("notif_done", "Done: {fname}").format(fname=fname),
+                        save_path=job.save_path if cfg.get("reveal_on_complete", True) else "")
+                    
         except Exception as e:
             job.status = Status.CANCELLED if job._cancel_evt.is_set() else Status.ERROR
             if job.status == Status.ERROR:
@@ -796,6 +884,12 @@ class SwiftGetFrame(wx.Frame):
         self.chk_notify.SetValue(self._cfg.get("notify_on_complete", True))
         grid_notify.Add(self.chk_notify, 0, wx.ALIGN_CENTER_VERTICAL)
 
+        grid_notify.Add(wx.StaticText(tab_notify, label=T.get("lbl_reveal", "Finder에서 열기:")),
+                        0, wx.ALIGN_CENTER_VERTICAL)
+        self.chk_reveal = wx.CheckBox(tab_notify, label=T.get("chk_reveal", "완료 시 Finder에서 파일 열기"))
+        self.chk_reveal.SetValue(self._cfg.get("reveal_on_complete", True))
+        grid_notify.Add(self.chk_reveal, 0, wx.ALIGN_CENTER_VERTICAL)
+
         sizer_notify = wx.BoxSizer(wx.VERTICAL)
         sizer_notify.Add(grid_notify, 0, wx.EXPAND | wx.ALL, 16)
         tab_notify.SetSizer(sizer_notify)
@@ -884,6 +978,7 @@ class SwiftGetFrame(wx.Frame):
         self.url_field.Bind(wx.EVT_TEXT_ENTER, self._on_quick_add)
         self.spin_seg.Bind(wx.EVT_SPINCTRL,    self._on_seg_change)
         self.chk_notify.Bind(wx.EVT_CHECKBOX,  self._on_notify_change)
+        self.chk_reveal.Bind(wx.EVT_CHECKBOX,  self._on_reveal_change)
         self.notebook.SetSelection(0)
 
     # ── 언어 변경 ─────────────────────────────────────────────────────────────
@@ -1088,6 +1183,10 @@ class SwiftGetFrame(wx.Frame):
         self._cfg["notify_on_complete"] = self.chk_notify.GetValue()
         save_config(self._cfg)
 
+    def _on_reveal_change(self, event):
+        self._cfg["reveal_on_complete"] = self.chk_reveal.GetValue()
+        save_config(self._cfg)
+
     def _on_clear_done(self, event):
         for j in list(self.engine.jobs):
             if j.status in (Status.DONE, Status.ERROR, Status.CANCELLED):
@@ -1249,6 +1348,8 @@ def main():
     app    = wx.App(False)
     engine = DownloadEngine(on_update=lambda: None)
     frame  = SwiftGetFrame(engine, dev_mode=dev_mode)
+
+    _setup_notification_delegate()  # ← 여기로 이동
 
     start_socket_server(engine, frame)
     status_bar = StatusBarController(frame)
