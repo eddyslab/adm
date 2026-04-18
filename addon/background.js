@@ -101,18 +101,30 @@ async function resolveFilename(url) {
 
 browser.contextMenus.create({
   id: "swiftget-download-link",
-  title: "SwiftGet으로 다운로드",
+  title: "SwiftGet으로 링크 다운로드",
   contexts: ["link"],
 });
 
 browser.contextMenus.create({
+  id: "swiftget-download-image",
+  title: "SwiftGet으로 이미지 저장",
+  contexts: ["image"],
+});
+
+browser.contextMenus.create({
   id: "swiftget-download-media",
-  title: "SwiftGet으로 다운로드",
-  contexts: ["image", "video", "audio"],
+  title: "SwiftGet으로 미디어 저장",
+  contexts: ["video", "audio"],
 });
 
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
-  const url = info.linkUrl || info.srcUrl || info.pageUrl;
+  let url;
+  if (info.menuItemId === "swiftget-download-link") {
+    url = info.linkUrl;
+  } else {
+    url = info.srcUrl;
+  }
+  url = url || info.pageUrl;
   if (!url) return;
 
   console.log("[SwiftGet] Context menu download:", url);
